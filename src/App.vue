@@ -9,21 +9,16 @@ import AppToolbar from './components/AppToolbar.vue';
 import HiraganaItem from './components/HiraganaItem.vue';
 import AppModal from './components/AppModal.vue';
 
-// 1. Bridge Zustand ke Vue Reactivity
-// Kita gunakan 'ref' agar Vue bisa melacak perubahan dari Zustand
 const state = ref<GameState>(gameStore.getState());
 
-// Subscribe ke Zustand: setiap ada perubahan state, update ref Vue
 const unsubscribe = gameStore.subscribe((newState) => {
   state.value = newState;
 });
 
-// 2. Lifecycle Hooks
 let timerInterval: ReturnType<typeof setInterval> | null = null;
 const isModalOpen = ref(false);
 
 onMounted(() => {
-  // Sinkronisasi awal saat komponen dimuat
   state.value = gameStore.getState();
 });
 
@@ -32,28 +27,35 @@ onUnmounted(() => {
   if (timerInterval) clearInterval(timerInterval);
 });
 
-// 3. Helper Functions untuk UI
 const isSelected = (id: string) => state.value.selectedChars.some(c => c.id === id);
 const isDisabled = (id: string) => !isSelected(id) && state.value.selectedChars.length >= state.value.maxCards;
 
-// 4. Actions & Handlers
 const handleToggleChar = (char: HiraganaChar) => {
   gameStore.getState().toggleChar(char);
 };
 
 const handleStart = () => {
-  // Cegah start jika belum ada huruf yang dipilih
   if (state.value.selectedChars.length === 0) {
     isModalOpen.value = true;
     return;
   }
   
-  // Ambil huruf, acak, dan masukkan ke activeCards
-  const shuffled = shuffleArray(state.value.selectedChars);
-  gameStore.getState().setActiveCards(shuffled);
+  let initialCards: HiraganaChar[] = [];
+
+  if (state.value.isShuffleEnabled) {
+    initialCards = shuffleArray(state.value.selectedChars);
+    if (state.value.activeCards.length > 0) {
+      while (isSameOrder(initialCards, state.value.activeCards)) {
+        initialCards = shuffleArray(state.value.selectedChars);
+      }
+    }
+  } else {
+    initialCards = [...state.value.selectedChars];
+  }
+  
+  gameStore.getState().setActiveCards(initialCards);
   gameStore.getState().startGame();
 
-  // Jalankan Timer
   if (timerInterval) clearInterval(timerInterval);
   timerInterval = setInterval(() => {
     if (!gameStore.getState().isPlaying) {
@@ -64,18 +66,15 @@ const handleStart = () => {
   }, 1000);
 };
 
-const handleShuffle = () => {
-  const currentCards = state.value.activeCards;
-  if (currentCards.length === 0) return;
-  
-  let newArr = shuffleArray(currentCards);
-  
-  // Pastikan urutan baru TIDAK sama dengan yang lama
-  while (isSameOrder(newArr, currentCards)) {
-    newArr = shuffleArray(currentCards);
-  }
-  
-  gameStore.getState().setActiveCards(newArr);
+// Handle Stop
+const handleStop = () => {
+  if (timerInterval) clearInterval(timerInterval);
+  gameStore.getState().resetGame();
+};
+
+// Handle Toggle Pause (dari toolbar)
+const handleTogglePause = () => {
+  gameStore.getState().togglePause();
 };
 
 const handleReset = () => {
@@ -83,7 +82,6 @@ const handleReset = () => {
   gameStore.getState().resetGame();
 };
 
-// 5. Computed: Dynamic Font Size berdasarkan jumlah huruf
 const fontClass = computed(() => {
   const count = state.value.activeCards.length;
   if (count <= 10) return 'text-5xl md:text-6xl';
@@ -91,13 +89,10 @@ const fontClass = computed(() => {
   return 'text-3xl md:text-4xl';
 });
 
-// 6. Computed: Dynamic Grid Columns (Responsive)
 const gridClass = computed(() => {
-  // Kita atur kolom berdasarkan mode (Card vs Plain)
   if (state.value.useCardStyle) {
     return 'grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8';
   } else {
-    // Mode Plain Text bisa lebih padat
     return 'grid-cols-5 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10';
   }
 });
@@ -106,36 +101,43 @@ const gridClass = computed(() => {
 <template>
   <div class="min-h-screen bg-slate-50 p-4 md:p-8 font-sans">
     
-    <!-- Header -->
     <header class="text-center mb-6">
       <h1 class="text-2xl md:text-3xl font-bold text-slate-800 mb-1">Hiragana Drill</h1>
       <p class="text-slate-500 text-sm">Latihan membaca cepat</p>
       
-      <!-- Timer Display (Hanya muncul saat bermain) -->
+      <!-- Timer Display: Merah jika <=10 dtk, Hijau jika Paused -->
       <div 
         v-if="state.isPlaying" 
-        class="mt-3 text-3xl font-mono font-bold inline-block px-4 py-1 rounded-full"
-        :class="state.timeLeft <= 10 ? 'text-red-600 bg-red-50 animate-pulse' : 'text-blue-600 bg-blue-50'"
+        class="mt-3 text-3xl font-mono font-bold inline-block px-4 py-1 rounded-full transition-colors duration-300"
+        :class="[
+          state.isPaused 
+            ? 'text-green-600 bg-green-50' 
+            : state.timeLeft <= 10 
+              ? 'text-red-600 bg-red-50 animate-pulse' 
+              : 'text-blue-600 bg-blue-50'
+        ]"
       >
-        ⏱ {{ state.timeLeft }} dtk
+        ⏱ {{ state.timeLeft }} dtk 
+        <span v-if="state.isPaused" class="text-sm font-sans font-normal ml-2 text-green-700">(Paused)</span>
       </div>
     </header>
 
-    <!-- Toolbar Kontrol -->
+    <!-- Toolbar dengan props onTogglePause -->
     <AppToolbar 
       :state="state"
       :on-start="handleStart"
-      :on-shuffle="handleShuffle"
+      :on-stop="handleStop" 
+      :on-toggle-pause="handleTogglePause"
       @update:max-cards="(val) => gameStore.getState().setMaxCards(val)"
       @update:time-input="(val) => gameStore.getState().setTimeInput(val)"
       @toggle-romaji="() => gameStore.getState().toggleRomaji()"
       @toggle-card-style="() => gameStore.getState().toggleCardStyle()"
+      @toggle-shuffle="() => gameStore.getState().toggleShuffle()"
     />
 
-    <!-- Main Content -->
     <main class="max-w-6xl mx-auto">
       
-      <!-- AREA 1: Checklist Huruf (Tampil saat IDLE) -->
+      <!-- AREA 1: Checklist Huruf -->
       <div v-if="!state.isPlaying" class="bg-white p-4 md:p-6 rounded-xl shadow-sm mb-6">
         <div class="flex justify-between items-center mb-4">
           <h2 class="font-semibold text-slate-700">
@@ -144,13 +146,6 @@ const gridClass = computed(() => {
               {{ state.selectedChars.length }} / {{ state.maxCards }}
             </span>
           </h2>
-          <button 
-            v-if="state.selectedChars.length < state.maxCards" 
-            class="text-sm text-blue-600 hover:underline"
-            @click="() => { /* Fitur pilih semua bisa ditambahkan nanti */ }"
-          >
-            (Pilih manual)
-          </button>
         </div>
         
         <div class="flex flex-wrap gap-2">
@@ -172,7 +167,7 @@ const gridClass = computed(() => {
         </div>
       </div>
 
-      <!-- AREA 2: Grid Kartu (Tampil saat PLAYING) -->
+      <!-- AREA 2: Grid Kartu -->
       <div 
         v-if="state.isPlaying && state.timeLeft > 0" 
         class="grid gap-2 md:gap-4 animate-in fade-in slide-in-from-bottom-4 duration-500"
@@ -188,7 +183,7 @@ const gridClass = computed(() => {
         />
       </div>
 
-      <!-- AREA 3: Waktu Habis (Tampil saat FINISHED) -->
+      <!-- AREA 3: Waktu Habis -->
       <div v-if="state.isPlaying && state.timeLeft === 0" class="text-center mt-12 animate-in fade-in zoom-in duration-300">
         <div class="inline-block bg-white p-8 rounded-2xl shadow-lg">
           <h2 class="text-3xl font-bold text-slate-800 mb-2">Waktu Habis! ⏰</h2>
@@ -204,7 +199,6 @@ const gridClass = computed(() => {
 
     </main>
 
-    <!-- Modal Kustom -->
     <AppModal 
       :is-open="isModalOpen" 
       title="Peringatan" 
@@ -215,7 +209,6 @@ const gridClass = computed(() => {
 </template>
 
 <style>
-/* Animasi kustom untuk transisi masuk */
 @keyframes slide-in-bottom {
   from { transform: translateY(20px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }

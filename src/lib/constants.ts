@@ -1,7 +1,6 @@
 // src/lib/constants.ts
 import type { HiraganaChar } from '../types';
 
-// Data lengkap 46 Huruf Hiragana Dasar (A sampai N)
 export const HIRAGANA_DATA: HiraganaChar[] = [
   { id: 'a', char: 'あ', romaji: 'a' }, { id: 'i', char: 'い', romaji: 'i' },
   { id: 'u', char: 'う', romaji: 'u' }, { id: 'e', char: 'え', romaji: 'e' },

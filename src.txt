@@ -1,0 +1,558 @@
+===== src/App.vue =====
+<!-- src/App.vue -->
+<script setup lang="ts">
+import { ref, onMounted, onUnmounted, computed } from 'vue';
+import { gameStore } from './store/gameStore';
+import { HIRAGANA_DATA } from './lib/constants';
+import { shuffleArray, isSameOrder } from './lib/utils';
+import type { GameState, HiraganaChar } from './types';
+import AppToolbar from './components/AppToolbar.vue';
+import HiraganaItem from './components/HiraganaItem.vue';
+import AppModal from './components/AppModal.vue';
+
+// 1. Hubungkan State Zustand ke Reactivity Vue
+const state = ref<GameState>(gameStore.getState());
+
+const unsubscribe = gameStore.subscribe((newState) => {
+  state.value = newState;
+});
+
+let timerInterval: ReturnType<typeof setInterval> | null = null;
+const isModalOpen = ref(false);
+
+// 2. Lifecycle Hooks
+onMounted(() => {
+  state.value = gameStore.getState();
+});
+
+onUnmounted(() => {
+  unsubscribe();
+  if (timerInterval) clearInterval(timerInterval);
+});
+
+// 3. Helper Functions
+const isSelected = (id: string) => state.value.selectedChars.some(c => c.id === id);
+const isDisabled = (id: string) => !isSelected(id) && state.value.selectedChars.length >= state.value.maxCards;
+
+const handleToggleChar = (char: HiraganaChar) => {
+  gameStore.getState().toggleChar(char);
+};
+
+// 4. Main Actions
+const handleStart = () => {
+  // Cegah mulai jika belum ada huruf yang dipilih
+  if (state.value.selectedChars.length === 0) {
+    isModalOpen.value = true;
+    return;
+  }
+  
+  let initialCards: HiraganaChar[] = [];
+
+  if (state.value.isShuffleEnabled) {
+    // JIKA MODE ACAK ON: Acak huruf
+    initialCards = shuffleArray(state.value.selectedChars);
+    
+    // Cek Anti-Duplikat: Jika kartu sebelumnya ada, dan hasil acak baru SAMA,
+    // maka acak ulang terus sampai berbeda.
+    if (state.value.activeCards.length > 0) {
+      while (isSameOrder(initialCards, state.value.activeCards)) {
+        initialCards = shuffleArray(state.value.selectedChars);
+      }
+    }
+  } else {
+    // JIKA MODE ACAK OFF: Tampilkan urut sesuai checklist
+    initialCards = [...state.value.selectedChars];
+  }
+  
+  gameStore.getState().setActiveCards(initialCards);
+  gameStore.getState().startGame();
+
+  // Jalankan Timer
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    if (!gameStore.getState().isPlaying) {
+      if (timerInterval) clearInterval(timerInterval);
+      return;
+    }
+    gameStore.getState().tickTimer();
+  }, 1000);
+};
+
+const handleReset = () => {
+  if (timerInterval) clearInterval(timerInterval);
+  gameStore.getState().resetGame();
+};
+
+// 5. Computed Styles
+const fontClass = computed(() => {
+  const count = state.value.activeCards.length;
+  if (count <= 10) return 'text-5xl md:text-6xl';
+  if (count <= 25) return 'text-4xl md:text-5xl';
+  return 'text-3xl md:text-4xl';
+});
+
+const gridClass = computed(() => {
+  if (state.value.useCardStyle) {
+    return 'grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8';
+  } else {
+    return 'grid-cols-5 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10';
+  }
+});
+</script>
+
+<template>
+  <div class="min-h-screen bg-slate-50 p-4 md:p-8 font-sans">
+    
+    <!-- Header -->
+    <header class="text-center mb-6">
+      <h1 class="text-2xl md:text-3xl font-bold text-slate-800 mb-1">Hiragana Drill</h1>
+      <p class="text-slate-500 text-sm">Latihan membaca cepat</p>
+      
+      <!-- Timer Display -->
+      <div 
+        v-if="state.isPlaying" 
+        class="mt-3 text-3xl font-mono font-bold inline-block px-4 py-1 rounded-full"
+        :class="state.timeLeft <= 10 ? 'text-red-600 bg-red-50 animate-pulse' : 'text-blue-600 bg-blue-50'"
+      >
+        ⏱ {{ state.timeLeft }} dtk
+      </div>
+    </header>
+
+    <!-- Toolbar Kontrol -->
+    <AppToolbar 
+      :state="state"
+      :on-start="handleStart"
+      @update:max-cards="(val) => gameStore.getState().setMaxCards(val)"
+      @update:time-input="(val) => gameStore.getState().setTimeInput(val)"
+      @toggle-romaji="() => gameStore.getState().toggleRomaji()"
+      @toggle-card-style="() => gameStore.getState().toggleCardStyle()"
+      @toggle-shuffle="() => gameStore.getState().toggleShuffle()"
+    />
+
+    <!-- Main Content -->
+    <main class="max-w-6xl mx-auto">
+      
+      <!-- AREA 1: Checklist Huruf (Tampil saat IDLE) -->
+      <div v-if="!state.isPlaying" class="bg-white p-4 md:p-6 rounded-xl shadow-sm mb-6">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="font-semibold text-slate-700">
+            Pilih Huruf 
+            <span class="ml-1 text-sm bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
+              {{ state.selectedChars.length }} / {{ state.maxCards }}
+            </span>
+          </h2>
+        </div>
+        
+        <div class="flex flex-wrap gap-2">
+          <button
+            v-for="char in HIRAGANA_DATA"
+            :key="char.id"
+            @click="handleToggleChar(char)"
+            :disabled="isDisabled(char.id)"
+            class="w-12 h-12 rounded-lg border-2 font-bold text-xl transition-all duration-200"
+            :class="[
+              isSelected(char.id) 
+                ? 'border-blue-500 bg-blue-50 text-blue-600 shadow-sm' 
+                : 'border-slate-200 text-slate-600 hover:border-slate-300 bg-white',
+              isDisabled(char.id) ? 'opacity-30 cursor-not-allowed' : ''
+            ]"
+          >
+            {{ char.char }}
+          </button>
+        </div>
+      </div>
+
+      <!-- AREA 2: Grid Kartu (Tampil saat PLAYING) -->
+      <div 
+        v-if="state.isPlaying && state.timeLeft > 0" 
+        class="grid gap-2 md:gap-4 animate-in fade-in slide-in-from-bottom-4 duration-500"
+        :class="gridClass"
+      >
+        <HiraganaItem 
+          v-for="card in state.activeCards" 
+          :key="card.id" 
+          :data="card" 
+          :show-romaji="state.showRomaji"
+          :use-card-style="state.useCardStyle"
+          :class="fontClass"
+        />
+      </div>
+
+      <!-- AREA 3: Waktu Habis (Tampil saat FINISHED) -->
+      <div v-if="state.isPlaying && state.timeLeft === 0" class="text-center mt-12 animate-in fade-in zoom-in duration-300">
+        <div class="inline-block bg-white p-8 rounded-2xl shadow-lg">
+          <h2 class="text-3xl font-bold text-slate-800 mb-2">Waktu Habis! ⏰</h2>
+          <p class="text-slate-500 mb-6">Latihan selesai.</p>
+          <button 
+            @click="handleReset" 
+            class="bg-blue-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors shadow-md shadow-blue-200"
+          >
+            Main Lagi
+          </button>
+        </div>
+      </div>
+
+    </main>
+
+    <!-- Modal Kustom -->
+    <AppModal 
+      :is-open="isModalOpen" 
+      title="Peringatan" 
+      message="Pilih minimal satu huruf sebelum memulai latihan!"
+      @close="isModalOpen = false"
+    />
+  </div>
+</template>
+
+<style>
+@keyframes slide-in-bottom {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.animate-in {
+  animation: slide-in-bottom 0.5s ease-out forwards;
+}
+</style>
+===== src/components/HiraganaItem.vue =====
+<!-- src/components/HiraganaItem.vue -->
+<script setup lang="ts">
+import type { HiraganaChar } from '../types';
+
+defineProps<{
+  data: HiraganaChar;
+  showRomaji: boolean;
+  useCardStyle: boolean;
+}>();
+</script>
+
+<template>
+  <div 
+    class="flex flex-col items-center justify-center transition-all duration-300 select-none p-2"
+    :class="[
+      useCardStyle 
+        ? 'bg-white shadow-md rounded-xl border border-gray-100 aspect-square hover:scale-105' 
+        : 'bg-transparent border-none shadow-none'
+    ]"
+  >
+    <span class="text-3xl md:text-4xl lg:text-5xl font-bold text-gray-800">{{ data.char }}</span>
+    <span 
+      class="text-xs md:text-sm lg:text-base text-gray-500 mt-1 transition-opacity duration-200"
+      :class="showRomaji ? 'opacity-100' : 'opacity-0'"
+    >
+      {{ data.romaji }}
+    </span>
+  </div>
+</template>
+===== src/components/AppModal.vue =====
+<!-- src/components/AppModal.vue -->
+<script setup lang="ts">
+import { X } from 'lucide-vue-next';
+
+defineProps<{
+  isOpen: boolean;
+  title: string;
+  message: string;
+}>();
+
+const emit = defineEmits<{
+  (e: 'close'): void;
+}>();
+</script>
+
+<template>
+  <Teleport to="body">
+    <Transition name="fade">
+      <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden transform transition-all">
+          <div class="flex justify-between items-center p-4 border-b border-gray-100">
+            <h3 class="font-bold text-lg text-gray-800">{{ title }}</h3>
+            <button @click="emit('close')" class="p-1 hover:bg-gray-100 rounded-full transition-colors">
+              <X :size="20" class="text-gray-500" />
+            </button>
+          </div>
+          <div class="p-6 text-gray-600">
+            {{ message }}
+          </div>
+          <div class="p-4 border-t border-gray-100 flex justify-end">
+            <button 
+              @click="emit('close')" 
+              class="bg-gray-800 text-white px-5 py-2 rounded-lg hover:bg-gray-700 transition-colors font-medium text-sm"
+            >
+              Tutup
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
+</template>
+
+<style scoped>
+.fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+</style>
+===== src/components/AppToolbar.vue =====
+<!-- src/components/AppToolbar.vue -->
+<script setup lang="ts">
+import { Play, LayoutGrid, AlignJustify, Timer } from 'lucide-vue-next';
+import type { GameState } from '../types';
+
+defineProps<{
+  state: GameState;
+  onStart: () => void;
+}>();
+
+const emit = defineEmits<{
+  (e: 'update:maxCards', val: number): void;
+  (e: 'update:timeInput', val: number): void;
+  (e: 'toggleRomaji'): void;
+  (e: 'toggleCardStyle'): void;
+  (e: 'toggleAutoShuffle'): void;
+}>();
+
+const handleMaxCardsChange = (e: Event) => {
+  emit('update:maxCards', Number((e.target as HTMLSelectElement).value));
+};
+
+const handleTimeInputChange = (e: Event) => {
+  emit('update:timeInput', Number((e.target as HTMLInputElement).value));
+};
+</script>
+
+<template>
+  <div class="bg-white p-4 rounded-xl shadow-sm mb-6 flex flex-wrap gap-4 items-center justify-center max-w-5xl mx-auto">
+    
+    <!-- Pilih Jumlah -->
+    <select 
+      :value="state.maxCards" 
+      @change="handleMaxCardsChange"
+      :disabled="state.isPlaying"
+      class="border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none disabled:opacity-50 disabled:bg-gray-100"
+    >
+      <option v-for="num in [5, 10, 15, 20, 25, 46]" :key="num" :value="num">
+        {{ num }} Huruf
+      </option>
+    </select>
+
+    <!-- Input Timer -->
+    <div class="flex items-center gap-1 border border-gray-300 rounded-lg px-2 bg-gray-50" :class="{ 'opacity-50': state.isPlaying }">
+      <Timer :size="16" class="text-gray-500" />
+      <input 
+        type="number" 
+        :value="state.timeInput" 
+        @change="handleTimeInputChange"
+        :disabled="state.isPlaying"
+        class="w-14 p-2 bg-transparent outline-none text-center text-sm"
+        min="5"
+      />
+      <span class="text-gray-500 text-xs">dtk</span>
+    </div>
+
+    <!-- Tombol Mulai -->
+    <button 
+      @click="onStart" 
+      :disabled="state.isPlaying"
+      class="flex items-center gap-1 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors text-sm font-medium"
+    >
+      <Play :size="16" /> Mulai
+    </button>
+
+    <div class="h-6 w-px bg-gray-300 mx-1 hidden md:block"></div>
+
+    <!-- TOGGLE SWITCH: Auto Shuffle -->
+    <label class="flex items-center gap-2 cursor-pointer select-none">
+      <span class="text-sm font-medium text-gray-700">Auto Acak</span>
+      <div class="relative">
+        <input 
+          type="checkbox" 
+          class="sr-only" 
+          :checked="state.isAutoShuffle"
+          @change="emit('toggleAutoShuffle')"
+          :disabled="!state.isPlaying"
+        >
+        <div 
+          class="w-10 h-5 rounded-full transition-colors duration-200"
+          :class="[state.isAutoShuffle ? 'bg-orange-500' : 'bg-gray-300', !state.isPlaying ? 'opacity-50' : '']"
+        ></div>
+        <div 
+          class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white transition-transform duration-200 shadow-sm"
+          :class="state.isAutoShuffle ? 'translate-x-5' : 'translate-x-0'"
+        ></div>
+      </div>
+    </label>
+
+    <!-- TOGGLE SWITCH: Romaji -->
+    <label class="flex items-center gap-2 cursor-pointer select-none">
+      <span class="text-sm font-medium text-gray-700">Romaji</span>
+      <div class="relative">
+        <input 
+          type="checkbox" 
+          class="sr-only" 
+          :checked="state.showRomaji"
+          @change="emit('toggleRomaji')"
+        >
+        <div 
+          class="w-10 h-5 rounded-full transition-colors duration-200"
+          :class="state.showRomaji ? 'bg-blue-500' : 'bg-gray-300'"
+        ></div>
+        <div 
+          class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white transition-transform duration-200 shadow-sm"
+          :class="state.showRomaji ? 'translate-x-5' : 'translate-x-0'"
+        ></div>
+      </div>
+    </label>
+
+    <!-- Toggle Card Style -->
+    <button 
+      @click="emit('toggleCardStyle')" 
+      class="flex items-center gap-1 bg-gray-200 text-gray-800 px-3 py-2 rounded-lg hover:bg-gray-300 transition-colors text-sm font-medium"
+      title="Ganti Tampilan"
+    >
+      <component :is="state.useCardStyle ? AlignJustify : LayoutGrid" :size="16" />
+    </button>
+
+  </div>
+</template>
+===== src/main.ts =====
+// src/main.ts
+import { createApp } from 'vue';
+import App from './App.vue';
+import './style.css'; // Pastikan baris ini ada
+
+createApp(App).mount('#app');
+===== src/style.css =====
+@import "tailwindcss";
+===== src/types/index.ts =====
+// src/types/index.ts
+
+export interface HiraganaChar {
+  id: string;
+  char: string;
+  romaji: string;
+}
+
+export interface GameState {
+  maxCards: number;
+  selectedChars: HiraganaChar[];
+  activeCards: HiraganaChar[];
+  showRomaji: boolean;
+  useCardStyle: boolean; // Toggle untuk Card vs Plain Text
+  timeInput: number;
+  timeLeft: number;
+  isPlaying: boolean;
+
+  // Actions
+  setMaxCards: (num: number) => void;
+  toggleChar: (char: HiraganaChar) => void;
+  toggleRomaji: () => void;
+  toggleCardStyle: () => void;
+  setTimeInput: (time: number) => void;
+  setActiveCards: (cards: HiraganaChar[]) => void;
+  startGame: () => boolean;
+  tickTimer: () => void;
+  resetGame: () => void;
+}
+===== src/lib/constants.ts =====
+// src/lib/constants.ts
+import type { HiraganaChar } from '../types';
+
+export const HIRAGANA_DATA: HiraganaChar[] = [
+  { id: 'a', char: 'あ', romaji: 'a' }, { id: 'i', char: 'い', romaji: 'i' },
+  { id: 'u', char: 'う', romaji: 'u' }, { id: 'e', char: 'え', romaji: 'e' },
+  { id: 'o', char: 'お', romaji: 'o' }, { id: 'ka', char: 'か', romaji: 'ka' },
+  { id: 'ki', char: 'き', romaji: 'ki' }, { id: 'ku', char: 'く', romaji: 'ku' },
+  { id: 'ke', char: 'け', romaji: 'ke' }, { id: 'ko', char: 'こ', romaji: 'ko' },
+  { id: 'sa', char: 'さ', romaji: 'sa' }, { id: 'shi', char: 'し', romaji: 'shi' },
+  { id: 'su', char: 'す', romaji: 'su' }, { id: 'se', char: 'せ', romaji: 'se' },
+  { id: 'so', char: 'そ', romaji: 'so' }, { id: 'ta', char: 'た', romaji: 'ta' },
+  { id: 'chi', char: 'ち', romaji: 'chi' }, { id: 'tsu', char: 'つ', romaji: 'tsu' },
+  { id: 'te', char: 'て', romaji: 'te' }, { id: 'to', char: 'と', romaji: 'to' },
+  { id: 'na', char: 'な', romaji: 'na' }, { id: 'ni', char: 'に', romaji: 'ni' },
+  { id: 'nu', char: 'ぬ', romaji: 'nu' }, { id: 'ne', char: 'ね', romaji: 'ne' },
+  { id: 'no', char: 'の', romaji: 'no' }, { id: 'ha', char: 'は', romaji: 'ha' },
+  { id: 'hi', char: 'ひ', romaji: 'hi' }, { id: 'fu', char: 'ふ', romaji: 'fu' },
+  { id: 'he', char: 'へ', romaji: 'he' }, { id: 'ho', char: 'ほ', romaji: 'ho' },
+  { id: 'ma', char: 'ま', romaji: 'ma' }, { id: 'mi', char: 'み', romaji: 'mi' },
+  { id: 'mu', char: 'む', romaji: 'mu' }, { id: 'me', char: 'め', romaji: 'me' },
+  { id: 'mo', char: 'も', romaji: 'mo' }, { id: 'ya', char: 'や', romaji: 'ya' },
+  { id: 'yu', char: 'ゆ', romaji: 'yu' }, { id: 'yo', char: 'よ', romaji: 'yo' },
+  { id: 'ra', char: 'ら', romaji: 'ra' }, { id: 'ri', char: 'り', romaji: 'ri' },
+  { id: 'ru', char: 'る', romaji: 'ru' }, { id: 're', char: 'れ', romaji: 're' },
+  { id: 'ro', char: 'ろ', romaji: 'ro' }, { id: 'wa', char: 'わ', romaji: 'wa' },
+  { id: 'wo', char: 'を', romaji: 'wo' }, { id: 'n', char: 'ん', romaji: 'n' },
+];
+===== src/lib/utils.ts =====
+// src/lib/utils.ts
+import type { HiraganaChar } from '../types';
+
+export const shuffleArray = (array: HiraganaChar[]): HiraganaChar[] => {
+  const newArr = [...array];
+  for (let i = newArr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [newArr[i], newArr[j]] = [newArr[j], newArr[i]];
+  }
+  return newArr;
+};
+
+export const isSameOrder = (arr1: HiraganaChar[], arr2: HiraganaChar[]): boolean => {
+  if (arr1.length !== arr2.length) return false;
+  return arr1.every((val, index) => val.id === arr2[index].id);
+};
+===== src/store/gameStore.ts =====
+// src/store/gameStore.ts
+import { createStore } from 'zustand/vanilla';
+import type { GameState } from '../types';
+import { HIRAGANA_DATA } from '../lib/constants';
+
+export const gameStore = createStore<GameState>((set, get) => ({
+  maxCards: 5,
+  selectedChars: HIRAGANA_DATA.slice(0, 5),
+  activeCards: [],
+  showRomaji: true,
+  useCardStyle: true,
+  isAutoShuffle: false,
+  timeInput: 60,
+  timeLeft: 60,
+  isPlaying: false,
+
+  setMaxCards: (num) => set((state) => {
+    const newSelected = state.selectedChars.slice(0, num);
+    return { maxCards: num, selectedChars: newSelected };
+  }),
+
+  toggleChar: (char) => set((state) => {
+    const isSelected = state.selectedChars.find((c) => c.id === char.id);
+    if (isSelected) {
+      return { selectedChars: state.selectedChars.filter((c) => c.id !== char.id) };
+    }
+    if (state.selectedChars.length >= state.maxCards) return state;
+    return { selectedChars: [...state.selectedChars, char] };
+  }),
+
+  toggleRomaji: () => set((state) => ({ showRomaji: !state.showRomaji })),
+  toggleCardStyle: () => set((state) => ({ useCardStyle: !state.useCardStyle })),
+  toggleAutoShuffle: () => set((state) => ({ isAutoShuffle: !state.isAutoShuffle })),
+
+  setTimeInput: (time) => set({ timeInput: time, timeLeft: time }),
+  setActiveCards: (cards) => set({ activeCards: cards }),
+
+  startGame: () => {
+    const state = get();
+    if (state.selectedChars.length === 0) return false;
+    set({ isPlaying: true, timeLeft: state.timeInput });
+    return true;
+  },
+
+  tickTimer: () => set((state) => {
+    if (state.timeLeft <= 1) {
+      return { timeLeft: 0, isPlaying: false };
+    }
+    return { timeLeft: state.timeLeft - 1 };
+  }),
+
+  resetGame: () => set((state) => ({ 
+    isPlaying: false, 
+    timeLeft: state.timeInput,
+    activeCards: [] 
+  })),
+}));

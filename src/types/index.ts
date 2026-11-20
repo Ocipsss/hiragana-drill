@@ -11,19 +11,23 @@ export interface GameState {
   selectedChars: HiraganaChar[];
   activeCards: HiraganaChar[];
   showRomaji: boolean;
-  useCardStyle: boolean; // Toggle untuk Card vs Plain Text
+  useCardStyle: boolean;
+  isShuffleEnabled: boolean;
   timeInput: number;
   timeLeft: number;
   isPlaying: boolean;
+  isPaused: boolean; // State baru
 
   // Actions
   setMaxCards: (num: number) => void;
   toggleChar: (char: HiraganaChar) => void;
   toggleRomaji: () => void;
   toggleCardStyle: () => void;
+  toggleShuffle: () => void;
   setTimeInput: (time: number) => void;
   setActiveCards: (cards: HiraganaChar[]) => void;
   startGame: () => boolean;
   tickTimer: () => void;
+  togglePause: () => void; // Action baru
   resetGame: () => void;
 }
