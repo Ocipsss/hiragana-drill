@@ -59,11 +59,11 @@ export interface GameState {
   toggleShuffle: () => void;
   setTimeInput: (time: number) => void;
   setActiveItems: (items: StudyItem[]) => void;
-  resetGame: () => void;
-  restartGame: () => void;
+  startGame: () => boolean;
   tickTimer: () => void;
   togglePause: () => void;
   resetGame: () => void;
+  restartGame: () => void; // <-- HANYA SATU KALI DI SINI
   loadHistory: () => Promise<void>;
   setHistoryData: (history: HistoryEntry[], lastRecord: HistoryEntry | null) => void;
   stopAndSetRecord: (record: HistoryEntry) => void;
