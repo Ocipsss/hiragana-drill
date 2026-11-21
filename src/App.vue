@@ -5,7 +5,7 @@ import { gameStore } from './store/gameStore';
 import { HIRAGANA_DATA } from './lib/constants';
 import { shuffleArray, isSameOrder, getFilteredWords, formatTime } from './lib/utils';
 import { saveHistory, getHistory, checkPersonalBest, clearAllHistory, deleteHistoryEntry } from './lib/db';
-import type { GameState, StudyItem, TimerMode } from './types';
+import type { GameState, StudyItem } from './types';
 import AppToolbar from './components/AppToolbar.vue';
 import HiraganaItem from './components/HiraganaItem.vue';
 import AppModal from './components/AppModal.vue';
