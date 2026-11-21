@@ -110,7 +110,8 @@ const handleFinish = async () => {
     wordFilter,
     durationMs: realDurationMs,
     avgMsPerItem,
-    items: currentState.activeItems,
+    // PERBAIKAN: Ubah ke objek polos (Deep Clone) untuk menghindari DataCloneError dari Proxy Vue
+    items: JSON.parse(JSON.stringify(currentState.activeItems)), 
     isPersonalBest: isPB
   };
 
