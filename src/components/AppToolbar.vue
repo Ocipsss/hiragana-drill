@@ -1,6 +1,6 @@
 <!-- src/components/AppToolbar.vue -->
 <script setup lang="ts">
-import { Play, Pause, Check, LayoutGrid, AlignJustify, Timer, Filter } from 'lucide-vue-next';
+import { Play, Pause, Check, LayoutGrid, AlignJustify, Timer, Filter, RotateCcw } from 'lucide-vue-next';
 import type { GameState, TimerMode } from '../types';
 
 defineProps<{
@@ -9,6 +9,7 @@ defineProps<{
   onStart: () => void;
   onStop: () => void;
   onTogglePause: () => void;
+  onRestart: () => void;
 }>();
 
 const emit = defineEmits<{
@@ -93,6 +94,16 @@ const handleTimeInputChange = (e: Event) => {
     </template>
 
     <template v-else>
+      <!-- Tombol Restart (Mulai Ulang) -->
+      <button 
+        @click="onRestart" 
+        :disabled="state.timerMode === 'countdown' && state.timeLeft === 0"
+        class="flex items-center gap-1 bg-orange-500 text-white px-3 py-2 rounded-lg hover:bg-orange-600 transition-colors text-sm font-medium disabled:opacity-50"
+        title="Mulai Ulang"
+      >
+        <RotateCcw :size="16" />
+      </button>
+
       <button 
         @click="onTogglePause" 
         class="flex items-center gap-1 text-white px-4 py-2 rounded-lg transition-colors text-sm font-medium"

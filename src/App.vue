@@ -5,13 +5,17 @@ import { gameStore } from './store/gameStore';
 import { HIRAGANA_DATA } from './lib/constants';
 import { shuffleArray, isSameOrder, getFilteredWords, formatTime } from './lib/utils';
 import { saveHistory, getHistory, checkPersonalBest, clearAllHistory, deleteHistoryEntry } from './lib/db';
+import { toCSV, toJSON, downloadFile, generateFilename } from './lib/export';
 import type { GameState, StudyItem } from './types';
+import { RotateCcw } from 'lucide-vue-next'; // Import icon untuk modal
 import AppToolbar from './components/AppToolbar.vue';
 import HiraganaItem from './components/HiraganaItem.vue';
 import AppModal from './components/AppModal.vue';
 import SelectModal from './components/SelectModal.vue';
 import FinishScreen from './components/FinishScreen.vue';
 import HistoryModal from './components/HistoryModal.vue';
+import ExportModal from './components/ExportModal.vue';
+import ConfirmModal from './components/ConfirmModal.vue'; // Import modal baru
 
 const state = ref<GameState>(gameStore.getState());
 
@@ -23,6 +27,8 @@ let timerInterval: ReturnType<typeof setInterval> | null = null;
 const isModalOpen = ref(false);
 const isFilterModalOpen = ref(false);
 const isHistoryModalOpen = ref(false);
+const isExportModalOpen = ref(false);
+const isRestartModalOpen = ref(false); // State baru untuk modal restart
 
 onMounted(async () => {
   state.value = gameStore.getState();
@@ -50,6 +56,17 @@ const handleToggleItem = (item: StudyItem) => {
   gameStore.getState().toggleItem(item);
 };
 
+const startTimer = () => {
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    if (!gameStore.getState().isPlaying) {
+      if (timerInterval) clearInterval(timerInterval);
+      return;
+    }
+    gameStore.getState().tickTimer();
+  }, 16);
+};
+
 const handleStart = () => {
   if (state.value.selectedItems.length === 0) {
     isModalOpen.value = true;
@@ -57,7 +74,6 @@ const handleStart = () => {
   }
   
   let initialItems: StudyItem[] = [];
-
   if (state.value.isShuffleEnabled) {
     initialItems = shuffleArray(state.value.selectedItems);
     if (state.value.activeItems.length > 0) {
@@ -71,16 +87,28 @@ const handleStart = () => {
   
   gameStore.getState().setActiveItems(initialItems);
   gameStore.getState().startGame();
+  startTimer();
+};
 
-  if (timerInterval) clearInterval(timerInterval);
-  // 16ms interval untuk presisi stopwatch (60fps)
-  timerInterval = setInterval(() => {
-    if (!gameStore.getState().isPlaying) {
-      if (timerInterval) clearInterval(timerInterval);
-      return;
+// 1. Buka modal restart (bukan langsung eksekusi)
+const handleRestartClick = () => {
+  isRestartModalOpen.value = true;
+};
+
+// 2. Eksekusi restart setelah konfirmasi
+const confirmRestart = () => {
+  isRestartModalOpen.value = false;
+  
+  if (state.value.isShuffleEnabled) {
+    let newItems = shuffleArray(state.value.selectedItems);
+    while (isSameOrder(newItems, state.value.activeItems)) {
+      newItems = shuffleArray(state.value.selectedItems);
     }
-    gameStore.getState().tickTimer();
-  }, 16);
+    gameStore.getState().setActiveItems(newItems);
+  }
+  
+  gameStore.getState().restartGame();
+  startTimer();
 };
 
 const handleFinish = async () => {
@@ -110,7 +138,6 @@ const handleFinish = async () => {
     wordFilter,
     durationMs: realDurationMs,
     avgMsPerItem,
-    // PERBAIKAN: Ubah ke objek polos (Deep Clone) untuk menghindari DataCloneError dari Proxy Vue
     items: JSON.parse(JSON.stringify(currentState.activeItems)), 
     isPersonalBest: isPB
   };
@@ -142,6 +169,18 @@ const handleClearAllHistory = async () => {
   gameStore.getState().setHistoryData([], null);
 };
 
+const handleExport = (payload: { format: 'csv' | 'json'; filteredHistory: any[] }) => {
+  const { format, filteredHistory } = payload;
+  if (format === 'csv') {
+    const csv = toCSV(filteredHistory);
+    downloadFile(csv, generateFilename('csv'), 'text/csv;charset=utf-8;');
+  } else {
+    const json = toJSON(filteredHistory);
+    downloadFile(json, generateFilename('json'), 'application/json');
+  }
+  isExportModalOpen.value = false;
+};
+
 const filterOptions = [
   { label: 'Semua Kata', value: 'all' },
   { label: '2 Huruf', value: '2' },
@@ -154,7 +193,6 @@ const handleSelectFilter = (val: string) => {
   isFilterModalOpen.value = false;
 };
 
-// Compute PB untuk History Bar
 const personalBest = computed(() => {
   const currentState = state.value;
   if (currentState.history.length === 0) return null;
@@ -173,13 +211,11 @@ const personalBest = computed(() => {
 const fontClass = computed(() => {
   const isWord = state.value.mode === 'word';
   const count = state.value.activeItems.length;
-  
   if (isWord) {
     if (count <= 10) return 'text-3xl md:text-4xl lg:text-5xl';
     if (count <= 25) return 'text-2xl md:text-3xl lg:text-4xl';
     return 'text-xl md:text-2xl lg:text-3xl';
   }
-  
   if (count <= 10) return 'text-5xl md:text-6xl';
   if (count <= 25) return 'text-4xl md:text-5xl';
   return 'text-3xl md:text-4xl';
@@ -191,7 +227,6 @@ const gridClass = computed(() => {
       ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5'
       : 'grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6';
   }
-
   return state.value.useCardStyle
     ? 'grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8'
     : 'grid-cols-5 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10';
@@ -205,7 +240,6 @@ const gridClass = computed(() => {
       <h1 class="text-2xl md:text-3xl font-bold text-slate-800 mb-1">Hiragana Drill</h1>
       <p class="text-slate-500 text-xs sm:text-sm">Latihan membaca cepat</p>
       
-      <!-- Timer Display -->
       <div 
         v-if="state.isPlaying" 
         class="mt-3 text-2xl sm:text-3xl font-mono font-bold inline-block px-4 py-1 rounded-full transition-colors duration-300"
@@ -227,7 +261,6 @@ const gridClass = computed(() => {
       </div>
     </header>
 
-    <!-- Tab Mode -->
     <div class="flex justify-center mb-4 sm:mb-6">
       <div class="bg-white rounded-lg shadow-sm p-1 inline-flex border border-gray-100">
         <button 
@@ -255,6 +288,7 @@ const gridClass = computed(() => {
       :on-start="handleStart"
       :on-stop="handleFinish" 
       :on-toggle-pause="handleTogglePause"
+      :on-restart="handleRestartClick" 
       @update:max-items="(val) => gameStore.getState().setMaxItems(val)"
       @update:time-input="(val) => gameStore.getState().setTimeInput(val)"
       @toggle-romaji="() => gameStore.getState().toggleRomaji()"
@@ -266,7 +300,6 @@ const gridClass = computed(() => {
 
     <main class="max-w-6xl mx-auto">
       
-      <!-- AREA 0: Finish Screen -->
       <FinishScreen 
         v-if="state.lastRecord" 
         :stats="state.lastRecord"
@@ -274,7 +307,6 @@ const gridClass = computed(() => {
         @viewHistory="isHistoryModalOpen = true"
       />
 
-      <!-- AREA 1: Checklist Item (IDLE) -->
       <div v-if="!state.isPlaying && !state.lastRecord && state.timeLeft > 0" class="bg-white p-3 sm:p-4 md:p-6 rounded-xl shadow-sm mb-6">
         <div class="flex justify-between items-center mb-4">
           <h2 class="font-semibold text-slate-700 text-sm sm:text-base">
@@ -305,7 +337,6 @@ const gridClass = computed(() => {
         </div>
       </div>
 
-      <!-- AREA 2: Grid Kartu (PLAYING) -->
       <div 
         v-if="state.isPlaying" 
         class="grid gap-2 md:gap-4 animate-in fade-in slide-in-from-bottom-4 duration-500"
@@ -321,7 +352,6 @@ const gridClass = computed(() => {
         />
       </div>
 
-      <!-- AREA 3: Waktu Habis (TIMEOUT) -->
       <div v-if="!state.isPlaying && !state.lastRecord && state.timeLeft === 0 && state.timerMode === 'countdown'" class="text-center mt-12 animate-in fade-in zoom-in duration-300">
         <div class="inline-block bg-white p-6 sm:p-8 rounded-2xl shadow-lg">
           <h2 class="text-2xl sm:text-3xl font-bold text-slate-800 mb-2">Waktu Habis! ⏰</h2>
@@ -335,7 +365,6 @@ const gridClass = computed(() => {
         </div>
       </div>
 
-      <!-- AREA 4: History Bar (IDLE only) -->
       <div v-if="!state.isPlaying && !state.lastRecord && state.timeLeft > 0" class="mt-8 text-center animate-in fade-in duration-500">
         <button @click="isHistoryModalOpen = true" class="inline-flex items-center gap-2 bg-white px-4 py-2 rounded-xl shadow-sm border border-gray-100 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors">
           📜 History ({{ state.history.length }})
@@ -367,6 +396,27 @@ const gridClass = computed(() => {
       @close="isHistoryModalOpen = false"
       @delete="handleDeleteHistory"
       @clearAll="handleClearAllHistory"
+      @open-export="isExportModalOpen = true"
+    />
+
+    <ExportModal 
+      :is-open="isExportModalOpen"
+      :history="state.history"
+      @close="isExportModalOpen = false"
+      @export="handleExport"
+    />
+
+    <!-- Modal Konfirmasi Restart BARU -->
+    <ConfirmModal 
+      :is-open="isRestartModalOpen"
+      title="Mulai Ulang Latihan?"
+      message="Timer akan direset dan urutan kartu akan diacak ulang (jika mode acak aktif). Latihan saat ini tidak akan disimpan."
+      confirmText="Ya, Mulai Ulang"
+      cancelText="Batal"
+      confirmColor="orange"
+      :icon="RotateCcw"
+      @close="isRestartModalOpen = false"
+      @confirm="confirmRestart"
     />
   </div>
 </template>
