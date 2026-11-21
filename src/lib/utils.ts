@@ -16,10 +16,18 @@ export const isSameOrder = (arr1: StudyItem[], arr2: StudyItem[]): boolean => {
   return arr1.every((val, index) => val.id === arr2[index].id);
 };
 
-// Fungsi baru untuk memfilter kata berdasarkan panjang
 export const getFilteredWords = (filter: WordLengthFilter): StudyItem[] => {
   if (filter === 'all') return WORD_DATA;
   if (filter === '2') return WORD_DATA.filter((w) => w.text.length === 2);
   if (filter === '3') return WORD_DATA.filter((w) => w.text.length === 3);
-  return WORD_DATA.filter((w) => w.text.length >= 4); // Untuk '4+'
+  return WORD_DATA.filter((w) => w.text.length >= 4);
+};
+
+// Fungsi baru untuk format stopwatch: MM:SS.mmm
+export const formatTime = (ms: number): string => {
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  const mm = Math.floor(ms % 1000);
+  return `${m > 0 ? m + ':' : ''}${s.toString().padStart(2, '0')}.${mm.toString().padStart(3, '0')}`;
 };

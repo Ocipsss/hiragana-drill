@@ -1,7 +1,7 @@
 <!-- src/components/AppToolbar.vue -->
 <script setup lang="ts">
-import { Play, Square, Pause, LayoutGrid, AlignJustify, Timer, Filter } from 'lucide-vue-next';
-import type { GameState } from '../types';
+import { Play, Pause, Check, LayoutGrid, AlignJustify, Timer, Filter } from 'lucide-vue-next';
+import type { GameState, TimerMode } from '../types';
 
 defineProps<{
   state: GameState;
@@ -17,7 +17,8 @@ const emit = defineEmits<{
   (e: 'toggleRomaji'): void;
   (e: 'toggleCardStyle'): void;
   (e: 'toggleShuffle'): void;
-  (e: 'openFilterModal'): void; // Emit baru untuk buka modal filter
+  (e: 'openFilterModal'): void;
+  (e: 'setTimerMode', mode: TimerMode): void;
 }>();
 
 const handleMaxItemsChange = (e: Event) => {
@@ -47,8 +48,28 @@ const handleTimeInputChange = (e: Event) => {
       />
     </div>
 
-    <!-- Input Timer -->
-    <div class="flex items-center gap-1 border border-gray-300 rounded-lg px-2 bg-gray-50" :class="{ 'opacity-50': state.isPlaying }">
+    <!-- Toggle Timer Mode -->
+    <div class="flex items-center border border-gray-300 rounded-lg p-1 bg-gray-50" :class="{ 'opacity-50': state.isPlaying }">
+      <button 
+        @click="emit('setTimerMode', 'countdown')"
+        :disabled="state.isPlaying"
+        class="px-2 py-1 rounded text-xs font-medium transition-colors"
+        :class="state.timerMode === 'countdown' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500 hover:text-gray-700'"
+      >
+        Countdown
+      </button>
+      <button 
+        @click="emit('setTimerMode', 'stopwatch')"
+        :disabled="state.isPlaying"
+        class="px-2 py-1 rounded text-xs font-medium transition-colors"
+        :class="state.timerMode === 'stopwatch' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500 hover:text-gray-700'"
+      >
+        Stopwatch
+      </button>
+    </div>
+
+    <!-- Input Timer (Hanya Countdown) -->
+    <div v-if="state.timerMode === 'countdown'" class="flex items-center gap-1 border border-gray-300 rounded-lg px-2 bg-gray-50" :class="{ 'opacity-50': state.isPlaying }">
       <Timer :size="16" class="text-gray-500" />
       <input 
         type="number" 
@@ -83,9 +104,9 @@ const handleTimeInputChange = (e: Event) => {
 
       <button 
         @click="onStop" 
-        class="flex items-center gap-1 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors text-sm font-medium"
+        class="flex items-center gap-1 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors text-sm font-medium"
       >
-        <Square :size="16" /> Stop
+        <Check :size="16" /> Selesai
       </button>
     </template>
 

@@ -3,12 +3,15 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { gameStore } from './store/gameStore';
 import { HIRAGANA_DATA } from './lib/constants';
-import { shuffleArray, isSameOrder, getFilteredWords } from './lib/utils';
-import type { GameState, StudyItem } from './types';
+import { shuffleArray, isSameOrder, getFilteredWords, formatTime } from './lib/utils';
+import { saveHistory, getHistory, checkPersonalBest, clearAllHistory, deleteHistoryEntry } from './lib/db';
+import type { GameState, StudyItem, TimerMode } from './types';
 import AppToolbar from './components/AppToolbar.vue';
 import HiraganaItem from './components/HiraganaItem.vue';
 import AppModal from './components/AppModal.vue';
-import SelectModal from './components/SelectModal.vue'; // Import modal baru
+import SelectModal from './components/SelectModal.vue';
+import FinishScreen from './components/FinishScreen.vue';
+import HistoryModal from './components/HistoryModal.vue';
 
 const state = ref<GameState>(gameStore.getState());
 
@@ -18,10 +21,12 @@ const unsubscribe = gameStore.subscribe((newState) => {
 
 let timerInterval: ReturnType<typeof setInterval> | null = null;
 const isModalOpen = ref(false);
-const isFilterModalOpen = ref(false); // State untuk modal filter
+const isFilterModalOpen = ref(false);
+const isHistoryModalOpen = ref(false);
 
-onMounted(() => {
+onMounted(async () => {
   state.value = gameStore.getState();
+  await gameStore.getState().loadHistory();
 });
 
 onUnmounted(() => {
@@ -29,7 +34,6 @@ onUnmounted(() => {
   if (timerInterval) clearInterval(timerInterval);
 });
 
-// Data dinamis berdasarkan mode dan filter
 const currentData = computed(() => {
   return state.value.mode === 'char' ? HIRAGANA_DATA : getFilteredWords(state.value.wordLengthFilter);
 });
@@ -69,18 +73,52 @@ const handleStart = () => {
   gameStore.getState().startGame();
 
   if (timerInterval) clearInterval(timerInterval);
+  // 16ms interval untuk presisi stopwatch (60fps)
   timerInterval = setInterval(() => {
     if (!gameStore.getState().isPlaying) {
       if (timerInterval) clearInterval(timerInterval);
       return;
     }
     gameStore.getState().tickTimer();
-  }, 1000);
+  }, 16);
 };
 
-const handleStop = () => {
+const handleFinish = async () => {
   if (timerInterval) clearInterval(timerInterval);
-  gameStore.getState().resetGame();
+  const currentState = gameStore.getState();
+  if (!currentState.isPlaying) return;
+
+  const now = Date.now();
+  const realDurationMs = now - currentState.startTimestamp - currentState.pausedAccumMs;
+  const itemCount = currentState.activeItems.length;
+  const avgMsPerItem = itemCount > 0 ? realDurationMs / itemCount : 0;
+  const wordFilter = currentState.mode === 'word' ? currentState.wordLengthFilter : undefined;
+
+  const isPB = await checkPersonalBest(
+    currentState.mode, 
+    currentState.timerMode, 
+    itemCount, 
+    wordFilter, 
+    avgMsPerItem
+  );
+
+  const entry = {
+    timestamp: Date.now(),
+    mode: currentState.mode,
+    timerMode: currentState.timerMode,
+    itemCount,
+    wordFilter,
+    durationMs: realDurationMs,
+    avgMsPerItem,
+    items: currentState.activeItems,
+    isPersonalBest: isPB
+  };
+
+  const saved = await saveHistory(entry);
+  const updatedHistory = await getHistory();
+
+  gameStore.getState().stopAndSetRecord(saved);
+  gameStore.getState().setHistoryData(updatedHistory, saved);
 };
 
 const handleTogglePause = () => {
@@ -92,7 +130,17 @@ const handleReset = () => {
   gameStore.getState().resetGame();
 };
 
-// Opsi Filter Modal
+const handleDeleteHistory = async (id: number) => {
+  await deleteHistoryEntry(id);
+  const updatedHistory = await getHistory();
+  gameStore.getState().setHistoryData(updatedHistory, state.value.lastRecord);
+};
+
+const handleClearAllHistory = async () => {
+  await clearAllHistory();
+  gameStore.getState().setHistoryData([], null);
+};
+
 const filterOptions = [
   { label: 'Semua Kata', value: 'all' },
   { label: '2 Huruf', value: '2' },
@@ -105,7 +153,22 @@ const handleSelectFilter = (val: string) => {
   isFilterModalOpen.value = false;
 };
 
-// Font size dinamis
+// Compute PB untuk History Bar
+const personalBest = computed(() => {
+  const currentState = state.value;
+  if (currentState.history.length === 0) return null;
+  
+  const relevant = currentState.history.filter(h => {
+    return h.mode === currentState.mode && 
+           h.timerMode === currentState.timerMode && 
+           h.itemCount === (currentState.mode === 'char' ? currentState.maxChars : currentState.maxWords) &&
+           (currentState.mode === 'char' || h.wordFilter === currentState.wordLengthFilter);
+  });
+  
+  if (relevant.length === 0) return null;
+  return Math.min(...relevant.map(h => h.avgMsPerItem));
+});
+
 const fontClass = computed(() => {
   const isWord = state.value.mode === 'word';
   const count = state.value.activeItems.length;
@@ -121,7 +184,6 @@ const fontClass = computed(() => {
   return 'text-3xl md:text-4xl';
 });
 
-// Grid class dinamis
 const gridClass = computed(() => {
   if (state.value.mode === 'word') {
     return state.value.useCardStyle
@@ -142,18 +204,24 @@ const gridClass = computed(() => {
       <h1 class="text-2xl md:text-3xl font-bold text-slate-800 mb-1">Hiragana Drill</h1>
       <p class="text-slate-500 text-xs sm:text-sm">Latihan membaca cepat</p>
       
+      <!-- Timer Display -->
       <div 
         v-if="state.isPlaying" 
         class="mt-3 text-2xl sm:text-3xl font-mono font-bold inline-block px-4 py-1 rounded-full transition-colors duration-300"
         :class="[
           state.isPaused 
             ? 'text-green-600 bg-green-50' 
-            : state.timeLeft <= 10 
+            : (state.timerMode === 'countdown' && state.timeLeft <= 10)
               ? 'text-red-600 bg-red-50 animate-pulse' 
               : 'text-blue-600 bg-blue-50'
         ]"
       >
-        ⏱ {{ state.timeLeft }} dtk 
+        <template v-if="state.timerMode === 'countdown'">
+          ⏱ {{ state.timeLeft }} dtk
+        </template>
+        <template v-else>
+          ⏱ {{ formatTime(state.elapsedMs) }}
+        </template>
         <span v-if="state.isPaused" class="text-xs sm:text-sm font-sans font-normal ml-2 text-green-700">(Paused)</span>
       </div>
     </header>
@@ -184,7 +252,7 @@ const gridClass = computed(() => {
       :state="state"
       :maxAvailable="maxAvailable"
       :on-start="handleStart"
-      :on-stop="handleStop" 
+      :on-stop="handleFinish" 
       :on-toggle-pause="handleTogglePause"
       @update:max-items="(val) => gameStore.getState().setMaxItems(val)"
       @update:time-input="(val) => gameStore.getState().setTimeInput(val)"
@@ -192,12 +260,21 @@ const gridClass = computed(() => {
       @toggle-card-style="() => gameStore.getState().toggleCardStyle()"
       @toggle-shuffle="() => gameStore.getState().toggleShuffle()"
       @open-filter-modal="isFilterModalOpen = true"
+      @set-timer-mode="(mode) => gameStore.getState().setTimerMode(mode)"
     />
 
     <main class="max-w-6xl mx-auto">
       
-      <!-- AREA 1: Checklist Item -->
-      <div v-if="!state.isPlaying" class="bg-white p-3 sm:p-4 md:p-6 rounded-xl shadow-sm mb-6">
+      <!-- AREA 0: Finish Screen -->
+      <FinishScreen 
+        v-if="state.lastRecord" 
+        :stats="state.lastRecord"
+        @replay="handleReset"
+        @viewHistory="isHistoryModalOpen = true"
+      />
+
+      <!-- AREA 1: Checklist Item (IDLE) -->
+      <div v-if="!state.isPlaying && !state.lastRecord && state.timeLeft > 0" class="bg-white p-3 sm:p-4 md:p-6 rounded-xl shadow-sm mb-6">
         <div class="flex justify-between items-center mb-4">
           <h2 class="font-semibold text-slate-700 text-sm sm:text-base">
             Pilih {{ state.mode === 'char' ? 'Huruf' : 'Kata' }}
@@ -227,9 +304,9 @@ const gridClass = computed(() => {
         </div>
       </div>
 
-      <!-- AREA 2: Grid Kartu -->
+      <!-- AREA 2: Grid Kartu (PLAYING) -->
       <div 
-        v-if="state.isPlaying && state.timeLeft > 0" 
+        v-if="state.isPlaying" 
         class="grid gap-2 md:gap-4 animate-in fade-in slide-in-from-bottom-4 duration-500"
         :class="gridClass"
       >
@@ -243,11 +320,11 @@ const gridClass = computed(() => {
         />
       </div>
 
-      <!-- AREA 3: Waktu Habis -->
-      <div v-if="state.isPlaying && state.timeLeft === 0" class="text-center mt-12 animate-in fade-in zoom-in duration-300">
+      <!-- AREA 3: Waktu Habis (TIMEOUT) -->
+      <div v-if="!state.isPlaying && !state.lastRecord && state.timeLeft === 0 && state.timerMode === 'countdown'" class="text-center mt-12 animate-in fade-in zoom-in duration-300">
         <div class="inline-block bg-white p-6 sm:p-8 rounded-2xl shadow-lg">
           <h2 class="text-2xl sm:text-3xl font-bold text-slate-800 mb-2">Waktu Habis! ⏰</h2>
-          <p class="text-slate-500 mb-6 text-sm sm:text-base">Latihan selesai.</p>
+          <p class="text-slate-500 mb-6 text-sm sm:text-base">Latihan gagal (tidak disimpan).</p>
           <button 
             @click="handleReset" 
             class="bg-blue-600 text-white px-6 sm:px-8 py-2 sm:py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors shadow-md shadow-blue-200"
@@ -255,6 +332,14 @@ const gridClass = computed(() => {
             Main Lagi
           </button>
         </div>
+      </div>
+
+      <!-- AREA 4: History Bar (IDLE only) -->
+      <div v-if="!state.isPlaying && !state.lastRecord && state.timeLeft > 0" class="mt-8 text-center animate-in fade-in duration-500">
+        <button @click="isHistoryModalOpen = true" class="inline-flex items-center gap-2 bg-white px-4 py-2 rounded-xl shadow-sm border border-gray-100 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors">
+          📜 History ({{ state.history.length }})
+          <span v-if="personalBest" class="text-yellow-600 bg-yellow-50 px-2 py-0.5 rounded text-xs font-bold">🏆 Rekor: {{ (personalBest / 1000).toFixed(2) }}s/item</span>
+        </button>
       </div>
 
     </main>
@@ -266,7 +351,6 @@ const gridClass = computed(() => {
       @close="isModalOpen = false"
     />
 
-    <!-- Modal Filter Baru -->
     <SelectModal 
       :is-open="isFilterModalOpen"
       title="Filter Panjang Kata"
@@ -274,6 +358,14 @@ const gridClass = computed(() => {
       :selected-value="state.wordLengthFilter"
       @close="isFilterModalOpen = false"
       @select="handleSelectFilter"
+    />
+
+    <HistoryModal 
+      :is-open="isHistoryModalOpen" 
+      :history="state.history" 
+      @close="isHistoryModalOpen = false"
+      @delete="handleDeleteHistory"
+      @clearAll="handleClearAllHistory"
     />
   </div>
 </template>

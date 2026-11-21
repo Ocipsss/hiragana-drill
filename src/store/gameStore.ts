@@ -3,6 +3,7 @@ import { createStore } from 'zustand/vanilla';
 import type { GameState } from '../types';
 import { HIRAGANA_DATA } from '../lib/constants';
 import { getFilteredWords } from '../lib/utils';
+import { getHistory } from '../lib/db';
 
 export const gameStore = createStore<GameState>((set, get) => ({
   mode: 'char',
@@ -11,13 +12,22 @@ export const gameStore = createStore<GameState>((set, get) => ({
   wordLengthFilter: 'all',
   selectedItems: HIRAGANA_DATA.slice(0, 5),
   activeItems: [],
-  showRomaji: false, // Default OFF
+  showRomaji: false,
   useCardStyle: true,
   isShuffleEnabled: false,
-  timeInput: 10, // Default 10 detik
+  timeInput: 10,
   timeLeft: 10,
   isPlaying: false,
   isPaused: false,
+  
+  // Timer & History Default
+  timerMode: 'countdown',
+  startTimestamp: 0,
+  elapsedMs: 0,
+  pausedAccumMs: 0,
+  pauseStartTimestamp: 0,
+  history: [],
+  lastRecord: null,
 
   setMode: (mode) => set((state) => {
     const sourceData = mode === 'char' ? HIRAGANA_DATA : getFilteredWords(state.wordLengthFilter);
@@ -29,7 +39,9 @@ export const gameStore = createStore<GameState>((set, get) => ({
       selectedItems: sourceData.slice(0, newMax),
       activeItems: [],
       isPlaying: false,
-      isPaused: false
+      isPaused: false,
+      lastRecord: null,
+      timeLeft: state.timeInput
     };
   }),
 
@@ -38,23 +50,29 @@ export const gameStore = createStore<GameState>((set, get) => ({
     const validNum = Math.max(1, Math.min(num, sourceData.length));
     
     if (state.mode === 'char') {
-      return { maxChars: validNum, selectedItems: state.selectedItems.slice(0, validNum) };
+      return { maxChars: validNum, selectedItems: state.selectedItems.slice(0, validNum), lastRecord: null };
     } else {
-      return { maxWords: validNum, selectedItems: state.selectedItems.slice(0, validNum) };
+      return { maxWords: validNum, selectedItems: state.selectedItems.slice(0, validNum), lastRecord: null };
     }
   }),
 
   setWordLengthFilter: (filter) => set((state) => {
     if (state.mode !== 'word') return { wordLengthFilter: filter };
-    
     const sourceData = getFilteredWords(filter);
     const newMax = Math.min(state.maxWords, sourceData.length);
     
     return {
       wordLengthFilter: filter,
-      selectedItems: sourceData.slice(0, newMax) // Reset checklist sesuai filter baru
+      selectedItems: sourceData.slice(0, newMax),
+      lastRecord: null
     };
   }),
+
+  setTimerMode: (mode) => set((state) => ({ 
+    timerMode: mode,
+    timeLeft: state.timeInput,
+    lastRecord: null
+  })),
 
   toggleItem: (item) => set((state) => {
     const isSelected = state.selectedItems.find((c) => c.id === item.id);
@@ -75,30 +93,80 @@ export const gameStore = createStore<GameState>((set, get) => ({
   setTimeInput: (time) => set({ timeInput: time, timeLeft: time }),
   setActiveItems: (items) => set({ activeItems: items }),
 
+  loadHistory: async () => {
+    const hist = await getHistory();
+    set({ history: hist });
+  },
+
+  setHistoryData: (history, lastRecord) => set({ history, lastRecord }),
+
+  stopAndSetRecord: (record) => set({
+    isPlaying: false,
+    isPaused: false,
+    lastRecord: record
+  }),
+
   startGame: () => {
     const state = get();
     if (state.selectedItems.length === 0) return false;
-    set({ isPlaying: true, timeLeft: state.timeInput, isPaused: false });
+    
+    set({ 
+      isPlaying: true, 
+      isPaused: false, 
+      timeLeft: state.timeInput, 
+      startTimestamp: Date.now(),
+      elapsedMs: 0,
+      pausedAccumMs: 0,
+      pauseStartTimestamp: 0,
+      lastRecord: null
+    });
     return true;
   },
 
   tickTimer: () => set((state) => {
-    if (state.isPaused) return state;
-    if (state.timeLeft <= 1) {
-      return { timeLeft: 0, isPlaying: false };
+    if (state.isPaused || !state.isPlaying) return state;
+    
+    const now = Date.now();
+    const realElapsed = now - state.startTimestamp - state.pausedAccumMs;
+
+    if (state.timerMode === 'countdown') {
+      const remaining = Math.max(0, state.timeInput - Math.floor(realElapsed / 1000));
+      if (remaining === 0) {
+        return { timeLeft: 0, isPlaying: false }; // Waktu habis (Fail)
+      }
+      return { timeLeft: remaining };
+    } else {
+      return { elapsedMs: realElapsed };
     }
-    return { timeLeft: state.timeLeft - 1 };
   }),
 
   togglePause: () => set((state) => {
-    if (!state.isPlaying || state.timeLeft === 0) return state;
-    return { isPaused: !state.isPaused };
+    if (!state.isPlaying || (state.timerMode === 'countdown' && state.timeLeft === 0)) return state;
+    
+    if (state.isPaused) {
+      const pauseDuration = Date.now() - state.pauseStartTimestamp;
+      return { 
+        isPaused: false, 
+        pausedAccumMs: state.pausedAccumMs + pauseDuration, 
+        pauseStartTimestamp: 0 
+      };
+    } else {
+      return { 
+        isPaused: true, 
+        pauseStartTimestamp: Date.now() 
+      };
+    }
   }),
 
   resetGame: () => set((state) => ({ 
     isPlaying: false, 
     isPaused: false,
     timeLeft: state.timeInput,
+    elapsedMs: 0,
+    startTimestamp: 0,
+    pausedAccumMs: 0,
+    pauseStartTimestamp: 0,
+    lastRecord: null,
     activeItems: [] 
   })),
 }));
