@@ -2,31 +2,70 @@
 import { createStore } from 'zustand/vanilla';
 import type { GameState } from '../types';
 import { HIRAGANA_DATA } from '../lib/constants';
+import { getFilteredWords } from '../lib/utils';
 
 export const gameStore = createStore<GameState>((set, get) => ({
-  maxCards: 5,
-  selectedChars: HIRAGANA_DATA.slice(0, 5),
-  activeCards: [],
-  showRomaji: true,
+  mode: 'char',
+  maxChars: 5,
+  maxWords: 5,
+  wordLengthFilter: 'all',
+  selectedItems: HIRAGANA_DATA.slice(0, 5),
+  activeItems: [],
+  showRomaji: false, // Default OFF
   useCardStyle: true,
   isShuffleEnabled: false,
-  timeInput: 60,
-  timeLeft: 60,
+  timeInput: 10, // Default 10 detik
+  timeLeft: 10,
   isPlaying: false,
-  isPaused: false, // Default: tidak pause
+  isPaused: false,
 
-  setMaxCards: (num) => set((state) => {
-    const newSelected = state.selectedChars.slice(0, num);
-    return { maxCards: num, selectedChars: newSelected };
+  setMode: (mode) => set((state) => {
+    const sourceData = mode === 'char' ? HIRAGANA_DATA : getFilteredWords(state.wordLengthFilter);
+    const limit = mode === 'char' ? state.maxChars : state.maxWords;
+    const newMax = Math.min(limit, sourceData.length);
+    
+    return {
+      mode,
+      selectedItems: sourceData.slice(0, newMax),
+      activeItems: [],
+      isPlaying: false,
+      isPaused: false
+    };
   }),
 
-  toggleChar: (char) => set((state) => {
-    const isSelected = state.selectedChars.find((c) => c.id === char.id);
-    if (isSelected) {
-      return { selectedChars: state.selectedChars.filter((c) => c.id !== char.id) };
+  setMaxItems: (num) => set((state) => {
+    const sourceData = state.mode === 'char' ? HIRAGANA_DATA : getFilteredWords(state.wordLengthFilter);
+    const validNum = Math.max(1, Math.min(num, sourceData.length));
+    
+    if (state.mode === 'char') {
+      return { maxChars: validNum, selectedItems: state.selectedItems.slice(0, validNum) };
+    } else {
+      return { maxWords: validNum, selectedItems: state.selectedItems.slice(0, validNum) };
     }
-    if (state.selectedChars.length >= state.maxCards) return state;
-    return { selectedChars: [...state.selectedChars, char] };
+  }),
+
+  setWordLengthFilter: (filter) => set((state) => {
+    if (state.mode !== 'word') return { wordLengthFilter: filter };
+    
+    const sourceData = getFilteredWords(filter);
+    const newMax = Math.min(state.maxWords, sourceData.length);
+    
+    return {
+      wordLengthFilter: filter,
+      selectedItems: sourceData.slice(0, newMax) // Reset checklist sesuai filter baru
+    };
+  }),
+
+  toggleItem: (item) => set((state) => {
+    const isSelected = state.selectedItems.find((c) => c.id === item.id);
+    if (isSelected) {
+      return { selectedItems: state.selectedItems.filter((c) => c.id !== item.id) };
+    }
+    
+    const limit = state.mode === 'char' ? state.maxChars : state.maxWords;
+    if (state.selectedItems.length >= limit) return state;
+    
+    return { selectedItems: [...state.selectedItems, item] };
   }),
 
   toggleRomaji: () => set((state) => ({ showRomaji: !state.showRomaji })),
@@ -34,28 +73,24 @@ export const gameStore = createStore<GameState>((set, get) => ({
   toggleShuffle: () => set((state) => ({ isShuffleEnabled: !state.isShuffleEnabled })),
 
   setTimeInput: (time) => set({ timeInput: time, timeLeft: time }),
-  setActiveCards: (cards) => set({ activeCards: cards }),
+  setActiveItems: (items) => set({ activeItems: items }),
 
   startGame: () => {
     const state = get();
-    if (state.selectedChars.length === 0) return false;
+    if (state.selectedItems.length === 0) return false;
     set({ isPlaying: true, timeLeft: state.timeInput, isPaused: false });
     return true;
   },
 
   tickTimer: () => set((state) => {
-    // Jika sedang pause, jangan kurangi waktu
     if (state.isPaused) return state;
-    
     if (state.timeLeft <= 1) {
       return { timeLeft: 0, isPlaying: false };
     }
     return { timeLeft: state.timeLeft - 1 };
   }),
 
-  // Action baru: Toggle Pause
   togglePause: () => set((state) => {
-    // Hanya bisa pause jika sedang bermain dan waktu belum habis
     if (!state.isPlaying || state.timeLeft === 0) return state;
     return { isPaused: !state.isPaused };
   }),
@@ -64,6 +99,6 @@ export const gameStore = createStore<GameState>((set, get) => ({
     isPlaying: false, 
     isPaused: false,
     timeLeft: state.timeInput,
-    activeCards: [] 
+    activeItems: [] 
   })),
 }));

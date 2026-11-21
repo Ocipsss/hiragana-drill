@@ -3,11 +3,12 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { gameStore } from './store/gameStore';
 import { HIRAGANA_DATA } from './lib/constants';
-import { shuffleArray, isSameOrder } from './lib/utils';
-import type { GameState, HiraganaChar } from './types';
+import { shuffleArray, isSameOrder, getFilteredWords } from './lib/utils';
+import type { GameState, StudyItem } from './types';
 import AppToolbar from './components/AppToolbar.vue';
 import HiraganaItem from './components/HiraganaItem.vue';
 import AppModal from './components/AppModal.vue';
+import SelectModal from './components/SelectModal.vue'; // Import modal baru
 
 const state = ref<GameState>(gameStore.getState());
 
@@ -17,6 +18,7 @@ const unsubscribe = gameStore.subscribe((newState) => {
 
 let timerInterval: ReturnType<typeof setInterval> | null = null;
 const isModalOpen = ref(false);
+const isFilterModalOpen = ref(false); // State untuk modal filter
 
 onMounted(() => {
   state.value = gameStore.getState();
@@ -27,33 +29,43 @@ onUnmounted(() => {
   if (timerInterval) clearInterval(timerInterval);
 });
 
-const isSelected = (id: string) => state.value.selectedChars.some(c => c.id === id);
-const isDisabled = (id: string) => !isSelected(id) && state.value.selectedChars.length >= state.value.maxCards;
+// Data dinamis berdasarkan mode dan filter
+const currentData = computed(() => {
+  return state.value.mode === 'char' ? HIRAGANA_DATA : getFilteredWords(state.value.wordLengthFilter);
+});
 
-const handleToggleChar = (char: HiraganaChar) => {
-  gameStore.getState().toggleChar(char);
+const maxAvailable = computed(() => currentData.value.length);
+
+const isSelected = (id: string) => state.value.selectedItems.some(c => c.id === id);
+const isDisabled = (id: string) => {
+  const limit = state.value.mode === 'char' ? state.value.maxChars : state.value.maxWords;
+  return !isSelected(id) && state.value.selectedItems.length >= limit;
+};
+
+const handleToggleItem = (item: StudyItem) => {
+  gameStore.getState().toggleItem(item);
 };
 
 const handleStart = () => {
-  if (state.value.selectedChars.length === 0) {
+  if (state.value.selectedItems.length === 0) {
     isModalOpen.value = true;
     return;
   }
   
-  let initialCards: HiraganaChar[] = [];
+  let initialItems: StudyItem[] = [];
 
   if (state.value.isShuffleEnabled) {
-    initialCards = shuffleArray(state.value.selectedChars);
-    if (state.value.activeCards.length > 0) {
-      while (isSameOrder(initialCards, state.value.activeCards)) {
-        initialCards = shuffleArray(state.value.selectedChars);
+    initialItems = shuffleArray(state.value.selectedItems);
+    if (state.value.activeItems.length > 0) {
+      while (isSameOrder(initialItems, state.value.activeItems)) {
+        initialItems = shuffleArray(state.value.selectedItems);
       }
     }
   } else {
-    initialCards = [...state.value.selectedChars];
+    initialItems = [...state.value.selectedItems];
   }
   
-  gameStore.getState().setActiveCards(initialCards);
+  gameStore.getState().setActiveItems(initialItems);
   gameStore.getState().startGame();
 
   if (timerInterval) clearInterval(timerInterval);
@@ -66,13 +78,11 @@ const handleStart = () => {
   }, 1000);
 };
 
-// Handle Stop
 const handleStop = () => {
   if (timerInterval) clearInterval(timerInterval);
   gameStore.getState().resetGame();
 };
 
-// Handle Toggle Pause (dari toolbar)
 const handleTogglePause = () => {
   gameStore.getState().togglePause();
 };
@@ -82,33 +92,59 @@ const handleReset = () => {
   gameStore.getState().resetGame();
 };
 
+// Opsi Filter Modal
+const filterOptions = [
+  { label: 'Semua Kata', value: 'all' },
+  { label: '2 Huruf', value: '2' },
+  { label: '3 Huruf', value: '3' },
+  { label: '4+ Huruf', value: '4+' },
+];
+
+const handleSelectFilter = (val: string) => {
+  gameStore.getState().setWordLengthFilter(val as any);
+  isFilterModalOpen.value = false;
+};
+
+// Font size dinamis
 const fontClass = computed(() => {
-  const count = state.value.activeCards.length;
+  const isWord = state.value.mode === 'word';
+  const count = state.value.activeItems.length;
+  
+  if (isWord) {
+    if (count <= 10) return 'text-3xl md:text-4xl lg:text-5xl';
+    if (count <= 25) return 'text-2xl md:text-3xl lg:text-4xl';
+    return 'text-xl md:text-2xl lg:text-3xl';
+  }
+  
   if (count <= 10) return 'text-5xl md:text-6xl';
   if (count <= 25) return 'text-4xl md:text-5xl';
   return 'text-3xl md:text-4xl';
 });
 
+// Grid class dinamis
 const gridClass = computed(() => {
-  if (state.value.useCardStyle) {
-    return 'grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8';
-  } else {
-    return 'grid-cols-5 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10';
+  if (state.value.mode === 'word') {
+    return state.value.useCardStyle
+      ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5'
+      : 'grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6';
   }
+
+  return state.value.useCardStyle
+    ? 'grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8'
+    : 'grid-cols-5 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10';
 });
 </script>
 
 <template>
-  <div class="min-h-screen bg-slate-50 p-4 md:p-8 font-sans">
+  <div class="min-h-screen bg-slate-50 p-3 sm:p-4 md:p-8 font-sans">
     
-    <header class="text-center mb-6">
+    <header class="text-center mb-4 sm:mb-6">
       <h1 class="text-2xl md:text-3xl font-bold text-slate-800 mb-1">Hiragana Drill</h1>
-      <p class="text-slate-500 text-sm">Latihan membaca cepat</p>
+      <p class="text-slate-500 text-xs sm:text-sm">Latihan membaca cepat</p>
       
-      <!-- Timer Display: Merah jika <=10 dtk, Hijau jika Paused -->
       <div 
         v-if="state.isPlaying" 
-        class="mt-3 text-3xl font-mono font-bold inline-block px-4 py-1 rounded-full transition-colors duration-300"
+        class="mt-3 text-2xl sm:text-3xl font-mono font-bold inline-block px-4 py-1 rounded-full transition-colors duration-300"
         :class="[
           state.isPaused 
             ? 'text-green-600 bg-green-50' 
@@ -118,51 +154,75 @@ const gridClass = computed(() => {
         ]"
       >
         ⏱ {{ state.timeLeft }} dtk 
-        <span v-if="state.isPaused" class="text-sm font-sans font-normal ml-2 text-green-700">(Paused)</span>
+        <span v-if="state.isPaused" class="text-xs sm:text-sm font-sans font-normal ml-2 text-green-700">(Paused)</span>
       </div>
     </header>
 
-    <!-- Toolbar dengan props onTogglePause -->
+    <!-- Tab Mode -->
+    <div class="flex justify-center mb-4 sm:mb-6">
+      <div class="bg-white rounded-lg shadow-sm p-1 inline-flex border border-gray-100">
+        <button 
+          @click="gameStore.getState().setMode('char')"
+          class="px-4 py-2 rounded-md text-sm font-medium transition-colors"
+          :class="state.mode === 'char' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-50'"
+          :disabled="state.isPlaying"
+        >
+          Huruf
+        </button>
+        <button 
+          @click="gameStore.getState().setMode('word')"
+          class="px-4 py-2 rounded-md text-sm font-medium transition-colors"
+          :class="state.mode === 'word' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-50'"
+          :disabled="state.isPlaying"
+        >
+          Kata
+        </button>
+      </div>
+    </div>
+
     <AppToolbar 
       :state="state"
+      :maxAvailable="maxAvailable"
       :on-start="handleStart"
       :on-stop="handleStop" 
       :on-toggle-pause="handleTogglePause"
-      @update:max-cards="(val) => gameStore.getState().setMaxCards(val)"
+      @update:max-items="(val) => gameStore.getState().setMaxItems(val)"
       @update:time-input="(val) => gameStore.getState().setTimeInput(val)"
       @toggle-romaji="() => gameStore.getState().toggleRomaji()"
       @toggle-card-style="() => gameStore.getState().toggleCardStyle()"
       @toggle-shuffle="() => gameStore.getState().toggleShuffle()"
+      @open-filter-modal="isFilterModalOpen = true"
     />
 
     <main class="max-w-6xl mx-auto">
       
-      <!-- AREA 1: Checklist Huruf -->
-      <div v-if="!state.isPlaying" class="bg-white p-4 md:p-6 rounded-xl shadow-sm mb-6">
+      <!-- AREA 1: Checklist Item -->
+      <div v-if="!state.isPlaying" class="bg-white p-3 sm:p-4 md:p-6 rounded-xl shadow-sm mb-6">
         <div class="flex justify-between items-center mb-4">
-          <h2 class="font-semibold text-slate-700">
-            Pilih Huruf 
-            <span class="ml-1 text-sm bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
-              {{ state.selectedChars.length }} / {{ state.maxCards }}
+          <h2 class="font-semibold text-slate-700 text-sm sm:text-base">
+            Pilih {{ state.mode === 'char' ? 'Huruf' : 'Kata' }}
+            <span class="ml-1 text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
+              {{ state.selectedItems.length }} / {{ state.mode === 'char' ? state.maxChars : state.maxWords }}
             </span>
           </h2>
         </div>
         
-        <div class="flex flex-wrap gap-2">
+        <div class="flex flex-wrap gap-1.5 sm:gap-2">
           <button
-            v-for="char in HIRAGANA_DATA"
-            :key="char.id"
-            @click="handleToggleChar(char)"
-            :disabled="isDisabled(char.id)"
-            class="w-12 h-12 rounded-lg border-2 font-bold text-xl transition-all duration-200"
+            v-for="item in currentData"
+            :key="item.id"
+            @click="handleToggleItem(item)"
+            :disabled="isDisabled(item.id)"
+            class="rounded-lg border-2 font-bold transition-all duration-200"
             :class="[
-              isSelected(char.id) 
+              state.mode === 'char' ? 'w-10 h-10 sm:w-12 sm:h-12 text-lg sm:text-xl' : 'px-2 py-1.5 sm:px-3 sm:py-2 text-sm sm:text-base',
+              isSelected(item.id) 
                 ? 'border-blue-500 bg-blue-50 text-blue-600 shadow-sm' 
                 : 'border-slate-200 text-slate-600 hover:border-slate-300 bg-white',
-              isDisabled(char.id) ? 'opacity-30 cursor-not-allowed' : ''
+              isDisabled(item.id) ? 'opacity-30 cursor-not-allowed' : ''
             ]"
           >
-            {{ char.char }}
+            {{ item.text }}
           </button>
         </div>
       </div>
@@ -174,9 +234,9 @@ const gridClass = computed(() => {
         :class="gridClass"
       >
         <HiraganaItem 
-          v-for="card in state.activeCards" 
-          :key="card.id" 
-          :data="card" 
+          v-for="item in state.activeItems" 
+          :key="item.id" 
+          :data="item" 
           :show-romaji="state.showRomaji"
           :use-card-style="state.useCardStyle"
           :class="fontClass"
@@ -185,12 +245,12 @@ const gridClass = computed(() => {
 
       <!-- AREA 3: Waktu Habis -->
       <div v-if="state.isPlaying && state.timeLeft === 0" class="text-center mt-12 animate-in fade-in zoom-in duration-300">
-        <div class="inline-block bg-white p-8 rounded-2xl shadow-lg">
-          <h2 class="text-3xl font-bold text-slate-800 mb-2">Waktu Habis! ⏰</h2>
-          <p class="text-slate-500 mb-6">Latihan selesai.</p>
+        <div class="inline-block bg-white p-6 sm:p-8 rounded-2xl shadow-lg">
+          <h2 class="text-2xl sm:text-3xl font-bold text-slate-800 mb-2">Waktu Habis! ⏰</h2>
+          <p class="text-slate-500 mb-6 text-sm sm:text-base">Latihan selesai.</p>
           <button 
             @click="handleReset" 
-            class="bg-blue-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors shadow-md shadow-blue-200"
+            class="bg-blue-600 text-white px-6 sm:px-8 py-2 sm:py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors shadow-md shadow-blue-200"
           >
             Main Lagi
           </button>
@@ -202,8 +262,18 @@ const gridClass = computed(() => {
     <AppModal 
       :is-open="isModalOpen" 
       title="Peringatan" 
-      message="Pilih minimal satu huruf sebelum memulai latihan!"
+      message="Pilih minimal satu item sebelum memulai latihan!"
       @close="isModalOpen = false"
+    />
+
+    <!-- Modal Filter Baru -->
+    <SelectModal 
+      :is-open="isFilterModalOpen"
+      title="Filter Panjang Kata"
+      :options="filterOptions"
+      :selected-value="state.wordLengthFilter"
+      @close="isFilterModalOpen = false"
+      @select="handleSelectFilter"
     />
   </div>
 </template>
