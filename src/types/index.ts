@@ -59,7 +59,8 @@ export interface GameState {
   toggleShuffle: () => void;
   setTimeInput: (time: number) => void;
   setActiveItems: (items: StudyItem[]) => void;
-  startGame: () => boolean;
+  resetGame: () => void;
+  restartGame: () => void;
   tickTimer: () => void;
   togglePause: () => void;
   resetGame: () => void;

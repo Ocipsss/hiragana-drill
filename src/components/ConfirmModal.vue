@@ -1,6 +1,6 @@
 <!-- src/components/ConfirmModal.vue -->
 <script setup lang="ts">
-import { X, AlertTriangle } from 'lucide-vue-next';
+import { AlertTriangle } from 'lucide-vue-next';
 import type { Component } from 'vue';
 
 defineProps<{
