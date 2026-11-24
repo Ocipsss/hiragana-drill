@@ -10,6 +10,7 @@ export interface StudyItem {
 export type GameMode = 'char' | 'word';
 export type WordLengthFilter = 'all' | '2' | '3' | '4+';
 export type TimerMode = 'countdown' | 'stopwatch';
+export type RowType = 'all' | 'a' | 'k' | 's' | 't' | 'n' | 'h' | 'm' | 'y' | 'r' | 'w' | 'nn';
 
 export interface HistoryEntry {
   id?: number;
@@ -29,6 +30,7 @@ export interface GameState {
   maxChars: number;
   maxWords: number;
   wordLengthFilter: WordLengthFilter;
+  selectedRows: RowType[]; // Ubah dari selectedRow (single) ke selectedRows (array)
   selectedItems: StudyItem[];
   activeItems: StudyItem[];
   showRomaji: boolean;
@@ -39,7 +41,6 @@ export interface GameState {
   isPlaying: boolean;
   isPaused: boolean;
   
-  // Timer & History State
   timerMode: TimerMode;
   startTimestamp: number;
   elapsedMs: number;
@@ -48,10 +49,10 @@ export interface GameState {
   history: HistoryEntry[];
   lastRecord: HistoryEntry | null;
 
-  // Actions
   setMode: (mode: GameMode) => void;
   setMaxItems: (num: number) => void;
   setWordLengthFilter: (filter: WordLengthFilter) => void;
+  toggleRowFilter: (row: RowType) => void; // Action baru (multi-select)
   setTimerMode: (mode: TimerMode) => void;
   toggleItem: (item: StudyItem) => void;
   toggleRomaji: () => void;
@@ -63,7 +64,7 @@ export interface GameState {
   tickTimer: () => void;
   togglePause: () => void;
   resetGame: () => void;
-  restartGame: () => void; // <-- HANYA SATU KALI DI SINI
+  restartGame: () => void;
   loadHistory: () => Promise<void>;
   setHistoryData: (history: HistoryEntry[], lastRecord: HistoryEntry | null) => void;
   stopAndSetRecord: (record: HistoryEntry) => void;

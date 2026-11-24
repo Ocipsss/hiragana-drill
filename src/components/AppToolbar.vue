@@ -24,7 +24,7 @@ const emit = defineEmits<{
 
 const handleMaxItemsChange = (e: Event) => {
   const val = Number((e.target as HTMLInputElement).value);
-  if (val > 0) emit('update:maxItems', val);
+  if (val >= 0) emit('update:maxItems', val);
 };
 
 const handleTimeInputChange = (e: Event) => {
@@ -44,7 +44,7 @@ const handleTimeInputChange = (e: Event) => {
         @change="handleMaxItemsChange"
         :disabled="state.isPlaying"
         class="w-12 sm:w-14 p-2 bg-transparent outline-none text-center text-sm font-bold text-gray-700"
-        min="1"
+        min="0"
         :max="maxAvailable"
       />
     </div>

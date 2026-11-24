@@ -6,8 +6,8 @@ import { HIRAGANA_DATA } from './lib/constants';
 import { shuffleArray, isSameOrder, getFilteredWords, formatTime } from './lib/utils';
 import { saveHistory, getHistory, checkPersonalBest, clearAllHistory, deleteHistoryEntry } from './lib/db';
 import { toCSV, toJSON, downloadFile, generateFilename } from './lib/export';
-import type { GameState, StudyItem } from './types';
-import { RotateCcw } from 'lucide-vue-next'; // Import icon untuk modal
+import type { GameState, StudyItem, RowType } from './types';
+import { RotateCcw, Filter } from 'lucide-vue-next';
 import AppToolbar from './components/AppToolbar.vue';
 import HiraganaItem from './components/HiraganaItem.vue';
 import AppModal from './components/AppModal.vue';
@@ -15,7 +15,8 @@ import SelectModal from './components/SelectModal.vue';
 import FinishScreen from './components/FinishScreen.vue';
 import HistoryModal from './components/HistoryModal.vue';
 import ExportModal from './components/ExportModal.vue';
-import ConfirmModal from './components/ConfirmModal.vue'; // Import modal baru
+import ConfirmModal from './components/ConfirmModal.vue';
+import RowFilterModal from './components/RowFilterModal.vue';
 
 const state = ref<GameState>(gameStore.getState());
 
@@ -28,7 +29,8 @@ const isModalOpen = ref(false);
 const isFilterModalOpen = ref(false);
 const isHistoryModalOpen = ref(false);
 const isExportModalOpen = ref(false);
-const isRestartModalOpen = ref(false); // State baru untuk modal restart
+const isRestartModalOpen = ref(false);
+const isRowFilterModalOpen = ref(false);
 
 onMounted(async () => {
   state.value = gameStore.getState();
@@ -54,6 +56,11 @@ const isDisabled = (id: string) => {
 
 const handleToggleItem = (item: StudyItem) => {
   gameStore.getState().toggleItem(item);
+};
+
+// Handler untuk multi-select filter
+const handleToggleRow = (row: RowType) => {
+  gameStore.getState().toggleRowFilter(row);
 };
 
 const startTimer = () => {
@@ -90,12 +97,10 @@ const handleStart = () => {
   startTimer();
 };
 
-// 1. Buka modal restart (bukan langsung eksekusi)
 const handleRestartClick = () => {
   isRestartModalOpen.value = true;
 };
 
-// 2. Eksekusi restart setelah konfirmasi
 const confirmRestart = () => {
   isRestartModalOpen.value = false;
   
@@ -191,6 +196,50 @@ const filterOptions = [
 const handleSelectFilter = (val: string) => {
   gameStore.getState().setWordLengthFilter(val as any);
   isFilterModalOpen.value = false;
+};
+
+// Data chip filter untuk desktop (multi-select)
+const desktopChips = computed(() => {
+  if (state.value.mode === 'word') {
+    return [{ label: 'Semua Kata', value: 'all' as RowType }];
+  }
+  return [
+    { label: 'A', value: 'a' as RowType },
+    { label: 'K', value: 'k' as RowType },
+    { label: 'S', value: 's' as RowType },
+    { label: 'T', value: 't' as RowType },
+    { label: 'N', value: 'n' as RowType },
+    { label: 'H', value: 'h' as RowType },
+    { label: 'M', value: 'm' as RowType },
+    { label: 'Y', value: 'y' as RowType },
+    { label: 'R', value: 'r' as RowType },
+    { label: 'W', value: 'w' as RowType },
+    { label: 'ん', value: 'nn' as RowType },
+    { label: 'Semua', value: 'all' as RowType },
+  ];
+});
+
+// Label untuk tombol filter di mobile
+const mobileFilterLabel = computed(() => {
+  const rows = state.value.selectedRows;
+  if (state.value.mode === 'word') {
+    return rows.includes('all') && state.value.selectedItems.length > 0 ? 'Semua Kata' : 'Tidak ada';
+  }
+  if (rows.length === 0) return 'Tidak ada';
+  if (rows.length === 11) return 'Semua';
+  return rows.map(r => {
+    const found = desktopChips.value.find(c => c.value === r);
+    return found ? found.label : r;
+  }).join(', ');
+});
+
+const isChipActive = (chipValue: RowType) => {
+  if (state.value.mode === 'word') {
+    return chipValue === 'all' && state.value.selectedRows.includes('all') && state.value.selectedItems.length > 0;
+  }
+  return chipValue === 'all'
+    ? state.value.selectedRows.length === 11
+    : state.value.selectedRows.includes(chipValue);
 };
 
 const personalBest = computed(() => {
@@ -308,13 +357,39 @@ const gridClass = computed(() => {
       />
 
       <div v-if="!state.isPlaying && !state.lastRecord && state.timeLeft > 0" class="bg-white p-3 sm:p-4 md:p-6 rounded-xl shadow-sm mb-6">
-        <div class="flex justify-between items-center mb-4">
+        
+        <!-- Header Checklist + Filter -->
+        <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-4">
           <h2 class="font-semibold text-slate-700 text-sm sm:text-base">
             Pilih {{ state.mode === 'char' ? 'Huruf' : 'Kata' }}
             <span class="ml-1 text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
               {{ state.selectedItems.length }} / {{ state.mode === 'char' ? state.maxChars : state.maxWords }}
             </span>
           </h2>
+
+          <!-- Tombol Filter (Mobile) -->
+          <button 
+            @click="isRowFilterModalOpen = true"
+            class="sm:hidden flex items-center gap-1 text-sm bg-slate-100 text-slate-600 px-3 py-1.5 rounded-lg hover:bg-slate-200"
+          >
+            <Filter :size="14" /> 
+            {{ mobileFilterLabel }}
+          </button>
+
+          <!-- Chip Filter (Desktop/Tablet) - Multi-select -->
+          <div class="hidden sm:flex flex-wrap gap-1">
+            <button
+              v-for="chip in desktopChips"
+              :key="chip.value"
+              @click="handleToggleRow(chip.value)"
+              class="px-2 py-1 rounded-md text-xs font-medium transition-colors border"
+              :class="isChipActive(chip.value)
+                ? 'bg-blue-100 text-blue-700 border-blue-300' 
+                : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'"
+            >
+              {{ chip.label }}
+            </button>
+          </div>
         </div>
         
         <div class="flex flex-wrap gap-1.5 sm:gap-2">
@@ -406,7 +481,6 @@ const gridClass = computed(() => {
       @export="handleExport"
     />
 
-    <!-- Modal Konfirmasi Restart BARU -->
     <ConfirmModal 
       :is-open="isRestartModalOpen"
       title="Mulai Ulang Latihan?"
@@ -417,6 +491,15 @@ const gridClass = computed(() => {
       :icon="RotateCcw"
       @close="isRestartModalOpen = false"
       @confirm="confirmRestart"
+    />
+
+    <!-- Modal Filter Baris BARU (Multi-select) -->
+    <RowFilterModal 
+      :is-open="isRowFilterModalOpen"
+      :selected-rows="state.selectedRows"
+      :is-word-mode="state.mode === 'word'"
+      @close="isRowFilterModalOpen = false"
+      @toggle="handleToggleRow"
     />
   </div>
 </template>

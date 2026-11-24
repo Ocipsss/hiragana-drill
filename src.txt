@@ -4,13 +4,21 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { gameStore } from './store/gameStore';
 import { HIRAGANA_DATA } from './lib/constants';
-import { shuffleArray, isSameOrder } from './lib/utils';
-import type { GameState, HiraganaChar } from './types';
+import { shuffleArray, isSameOrder, getFilteredWords, formatTime } from './lib/utils';
+import { saveHistory, getHistory, checkPersonalBest, clearAllHistory, deleteHistoryEntry } from './lib/db';
+import { toCSV, toJSON, downloadFile, generateFilename } from './lib/export';
+import type { GameState, StudyItem, RowType } from './types';
+import { RotateCcw, Filter } from 'lucide-vue-next';
 import AppToolbar from './components/AppToolbar.vue';
 import HiraganaItem from './components/HiraganaItem.vue';
 import AppModal from './components/AppModal.vue';
+import SelectModal from './components/SelectModal.vue';
+import FinishScreen from './components/FinishScreen.vue';
+import HistoryModal from './components/HistoryModal.vue';
+import ExportModal from './components/ExportModal.vue';
+import ConfirmModal from './components/ConfirmModal.vue';
+import RowFilterModal from './components/RowFilterModal.vue';
 
-// 1. Hubungkan State Zustand ke Reactivity Vue
 const state = ref<GameState>(gameStore.getState());
 
 const unsubscribe = gameStore.subscribe((newState) => {
@@ -19,10 +27,15 @@ const unsubscribe = gameStore.subscribe((newState) => {
 
 let timerInterval: ReturnType<typeof setInterval> | null = null;
 const isModalOpen = ref(false);
+const isFilterModalOpen = ref(false);
+const isHistoryModalOpen = ref(false);
+const isExportModalOpen = ref(false);
+const isRestartModalOpen = ref(false);
+const isRowFilterModalOpen = ref(false);
 
-// 2. Lifecycle Hooks
-onMounted(() => {
+onMounted(async () => {
   state.value = gameStore.getState();
+  await gameStore.getState().loadHistory();
 });
 
 onUnmounted(() => {
@@ -30,44 +43,28 @@ onUnmounted(() => {
   if (timerInterval) clearInterval(timerInterval);
 });
 
-// 3. Helper Functions
-const isSelected = (id: string) => state.value.selectedChars.some(c => c.id === id);
-const isDisabled = (id: string) => !isSelected(id) && state.value.selectedChars.length >= state.value.maxCards;
+const currentData = computed(() => {
+  return state.value.mode === 'char' ? HIRAGANA_DATA : getFilteredWords(state.value.wordLengthFilter);
+});
 
-const handleToggleChar = (char: HiraganaChar) => {
-  gameStore.getState().toggleChar(char);
+const maxAvailable = computed(() => currentData.value.length);
+
+const isSelected = (id: string) => state.value.selectedItems.some(c => c.id === id);
+const isDisabled = (id: string) => {
+  const limit = state.value.mode === 'char' ? state.value.maxChars : state.value.maxWords;
+  return !isSelected(id) && state.value.selectedItems.length >= limit;
 };
 
-// 4. Main Actions
-const handleStart = () => {
-  // Cegah mulai jika belum ada huruf yang dipilih
-  if (state.value.selectedChars.length === 0) {
-    isModalOpen.value = true;
-    return;
-  }
-  
-  let initialCards: HiraganaChar[] = [];
+const handleToggleItem = (item: StudyItem) => {
+  gameStore.getState().toggleItem(item);
+};
 
-  if (state.value.isShuffleEnabled) {
-    // JIKA MODE ACAK ON: Acak huruf
-    initialCards = shuffleArray(state.value.selectedChars);
-    
-    // Cek Anti-Duplikat: Jika kartu sebelumnya ada, dan hasil acak baru SAMA,
-    // maka acak ulang terus sampai berbeda.
-    if (state.value.activeCards.length > 0) {
-      while (isSameOrder(initialCards, state.value.activeCards)) {
-        initialCards = shuffleArray(state.value.selectedChars);
-      }
-    }
-  } else {
-    // JIKA MODE ACAK OFF: Tampilkan urut sesuai checklist
-    initialCards = [...state.value.selectedChars];
-  }
-  
-  gameStore.getState().setActiveCards(initialCards);
-  gameStore.getState().startGame();
+// Handler untuk multi-select filter
+const handleToggleRow = (row: RowType) => {
+  gameStore.getState().toggleRowFilter(row);
+};
 
-  // Jalankan Timer
+const startTimer = () => {
   if (timerInterval) clearInterval(timerInterval);
   timerInterval = setInterval(() => {
     if (!gameStore.getState().isPlaying) {
@@ -75,7 +72,91 @@ const handleStart = () => {
       return;
     }
     gameStore.getState().tickTimer();
-  }, 1000);
+  }, 16);
+};
+
+const handleStart = () => {
+  if (state.value.selectedItems.length === 0) {
+    isModalOpen.value = true;
+    return;
+  }
+  
+  let initialItems: StudyItem[] = [];
+  if (state.value.isShuffleEnabled) {
+    initialItems = shuffleArray(state.value.selectedItems);
+    if (state.value.activeItems.length > 0) {
+      while (isSameOrder(initialItems, state.value.activeItems)) {
+        initialItems = shuffleArray(state.value.selectedItems);
+      }
+    }
+  } else {
+    initialItems = [...state.value.selectedItems];
+  }
+  
+  gameStore.getState().setActiveItems(initialItems);
+  gameStore.getState().startGame();
+  startTimer();
+};
+
+const handleRestartClick = () => {
+  isRestartModalOpen.value = true;
+};
+
+const confirmRestart = () => {
+  isRestartModalOpen.value = false;
+  
+  if (state.value.isShuffleEnabled) {
+    let newItems = shuffleArray(state.value.selectedItems);
+    while (isSameOrder(newItems, state.value.activeItems)) {
+      newItems = shuffleArray(state.value.selectedItems);
+    }
+    gameStore.getState().setActiveItems(newItems);
+  }
+  
+  gameStore.getState().restartGame();
+  startTimer();
+};
+
+const handleFinish = async () => {
+  if (timerInterval) clearInterval(timerInterval);
+  const currentState = gameStore.getState();
+  if (!currentState.isPlaying) return;
+
+  const now = Date.now();
+  const realDurationMs = now - currentState.startTimestamp - currentState.pausedAccumMs;
+  const itemCount = currentState.activeItems.length;
+  const avgMsPerItem = itemCount > 0 ? realDurationMs / itemCount : 0;
+  const wordFilter = currentState.mode === 'word' ? currentState.wordLengthFilter : undefined;
+
+  const isPB = await checkPersonalBest(
+    currentState.mode, 
+    currentState.timerMode, 
+    itemCount, 
+    wordFilter, 
+    avgMsPerItem
+  );
+
+  const entry = {
+    timestamp: Date.now(),
+    mode: currentState.mode,
+    timerMode: currentState.timerMode,
+    itemCount,
+    wordFilter,
+    durationMs: realDurationMs,
+    avgMsPerItem,
+    items: JSON.parse(JSON.stringify(currentState.activeItems)), 
+    isPersonalBest: isPB
+  };
+
+  const saved = await saveHistory(entry);
+  const updatedHistory = await getHistory();
+
+  gameStore.getState().stopAndSetRecord(saved);
+  gameStore.getState().setHistoryData(updatedHistory, saved);
+};
+
+const handleTogglePause = () => {
+  gameStore.getState().togglePause();
 };
 
 const handleReset = () => {
@@ -83,123 +164,332 @@ const handleReset = () => {
   gameStore.getState().resetGame();
 };
 
-// 5. Computed Styles
+const handleDeleteHistory = async (id: number) => {
+  await deleteHistoryEntry(id);
+  const updatedHistory = await getHistory();
+  gameStore.getState().setHistoryData(updatedHistory, state.value.lastRecord);
+};
+
+const handleClearAllHistory = async () => {
+  await clearAllHistory();
+  gameStore.getState().setHistoryData([], null);
+};
+
+const handleExport = (payload: { format: 'csv' | 'json'; filteredHistory: any[] }) => {
+  const { format, filteredHistory } = payload;
+  if (format === 'csv') {
+    const csv = toCSV(filteredHistory);
+    downloadFile(csv, generateFilename('csv'), 'text/csv;charset=utf-8;');
+  } else {
+    const json = toJSON(filteredHistory);
+    downloadFile(json, generateFilename('json'), 'application/json');
+  }
+  isExportModalOpen.value = false;
+};
+
+const filterOptions = [
+  { label: 'Semua Kata', value: 'all' },
+  { label: '2 Huruf', value: '2' },
+  { label: '3 Huruf', value: '3' },
+  { label: '4+ Huruf', value: '4+' },
+];
+
+const handleSelectFilter = (val: string) => {
+  gameStore.getState().setWordLengthFilter(val as any);
+  isFilterModalOpen.value = false;
+};
+
+// Data chip filter untuk desktop (multi-select)
+const desktopChips = computed(() => {
+  if (state.value.mode === 'word') {
+    return [{ label: 'Semua Kata', value: 'all' as RowType }];
+  }
+  return [
+    { label: 'A', value: 'a' as RowType },
+    { label: 'K', value: 'k' as RowType },
+    { label: 'S', value: 's' as RowType },
+    { label: 'T', value: 't' as RowType },
+    { label: 'N', value: 'n' as RowType },
+    { label: 'H', value: 'h' as RowType },
+    { label: 'M', value: 'm' as RowType },
+    { label: 'Y', value: 'y' as RowType },
+    { label: 'R', value: 'r' as RowType },
+    { label: 'W', value: 'w' as RowType },
+    { label: 'ん', value: 'nn' as RowType },
+    { label: 'Semua', value: 'all' as RowType },
+  ];
+});
+
+// Label untuk tombol filter di mobile
+const mobileFilterLabel = computed(() => {
+  const rows = state.value.selectedRows;
+  if (rows.length === 0 || rows.length === 11) return 'Semua';
+  return rows.map(r => {
+    const found = desktopChips.value.find(c => c.value === r);
+    return found ? found.label : r;
+  }).join(', ');
+});
+
+const personalBest = computed(() => {
+  const currentState = state.value;
+  if (currentState.history.length === 0) return null;
+  
+  const relevant = currentState.history.filter(h => {
+    return h.mode === currentState.mode && 
+           h.timerMode === currentState.timerMode && 
+           h.itemCount === (currentState.mode === 'char' ? currentState.maxChars : currentState.maxWords) &&
+           (currentState.mode === 'char' || h.wordFilter === currentState.wordLengthFilter);
+  });
+  
+  if (relevant.length === 0) return null;
+  return Math.min(...relevant.map(h => h.avgMsPerItem));
+});
+
 const fontClass = computed(() => {
-  const count = state.value.activeCards.length;
+  const isWord = state.value.mode === 'word';
+  const count = state.value.activeItems.length;
+  if (isWord) {
+    if (count <= 10) return 'text-3xl md:text-4xl lg:text-5xl';
+    if (count <= 25) return 'text-2xl md:text-3xl lg:text-4xl';
+    return 'text-xl md:text-2xl lg:text-3xl';
+  }
   if (count <= 10) return 'text-5xl md:text-6xl';
   if (count <= 25) return 'text-4xl md:text-5xl';
   return 'text-3xl md:text-4xl';
 });
 
 const gridClass = computed(() => {
-  if (state.value.useCardStyle) {
-    return 'grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8';
-  } else {
-    return 'grid-cols-5 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10';
+  if (state.value.mode === 'word') {
+    return state.value.useCardStyle
+      ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5'
+      : 'grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6';
   }
+  return state.value.useCardStyle
+    ? 'grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8'
+    : 'grid-cols-5 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10';
 });
 </script>
 
 <template>
-  <div class="min-h-screen bg-slate-50 p-4 md:p-8 font-sans">
+  <div class="min-h-screen bg-slate-50 p-3 sm:p-4 md:p-8 font-sans">
     
-    <!-- Header -->
-    <header class="text-center mb-6">
+    <header class="text-center mb-4 sm:mb-6">
       <h1 class="text-2xl md:text-3xl font-bold text-slate-800 mb-1">Hiragana Drill</h1>
-      <p class="text-slate-500 text-sm">Latihan membaca cepat</p>
+      <p class="text-slate-500 text-xs sm:text-sm">Latihan membaca cepat</p>
       
-      <!-- Timer Display -->
       <div 
         v-if="state.isPlaying" 
-        class="mt-3 text-3xl font-mono font-bold inline-block px-4 py-1 rounded-full"
-        :class="state.timeLeft <= 10 ? 'text-red-600 bg-red-50 animate-pulse' : 'text-blue-600 bg-blue-50'"
+        class="mt-3 text-2xl sm:text-3xl font-mono font-bold inline-block px-4 py-1 rounded-full transition-colors duration-300"
+        :class="[
+          state.isPaused 
+            ? 'text-green-600 bg-green-50' 
+            : (state.timerMode === 'countdown' && state.timeLeft <= 10)
+              ? 'text-red-600 bg-red-50 animate-pulse' 
+              : 'text-blue-600 bg-blue-50'
+        ]"
       >
-        ⏱ {{ state.timeLeft }} dtk
+        <template v-if="state.timerMode === 'countdown'">
+          ⏱ {{ state.timeLeft }} dtk
+        </template>
+        <template v-else>
+          ⏱ {{ formatTime(state.elapsedMs) }}
+        </template>
+        <span v-if="state.isPaused" class="text-xs sm:text-sm font-sans font-normal ml-2 text-green-700">(Paused)</span>
       </div>
     </header>
 
-    <!-- Toolbar Kontrol -->
+    <div class="flex justify-center mb-4 sm:mb-6">
+      <div class="bg-white rounded-lg shadow-sm p-1 inline-flex border border-gray-100">
+        <button 
+          @click="gameStore.getState().setMode('char')"
+          class="px-4 py-2 rounded-md text-sm font-medium transition-colors"
+          :class="state.mode === 'char' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-50'"
+          :disabled="state.isPlaying"
+        >
+          Huruf
+        </button>
+        <button 
+          @click="gameStore.getState().setMode('word')"
+          class="px-4 py-2 rounded-md text-sm font-medium transition-colors"
+          :class="state.mode === 'word' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-50'"
+          :disabled="state.isPlaying"
+        >
+          Kata
+        </button>
+      </div>
+    </div>
+
     <AppToolbar 
       :state="state"
+      :maxAvailable="maxAvailable"
       :on-start="handleStart"
-      @update:max-cards="(val) => gameStore.getState().setMaxCards(val)"
+      :on-stop="handleFinish" 
+      :on-toggle-pause="handleTogglePause"
+      :on-restart="handleRestartClick" 
+      @update:max-items="(val) => gameStore.getState().setMaxItems(val)"
       @update:time-input="(val) => gameStore.getState().setTimeInput(val)"
       @toggle-romaji="() => gameStore.getState().toggleRomaji()"
       @toggle-card-style="() => gameStore.getState().toggleCardStyle()"
       @toggle-shuffle="() => gameStore.getState().toggleShuffle()"
+      @open-filter-modal="isFilterModalOpen = true"
+      @set-timer-mode="(mode) => gameStore.getState().setTimerMode(mode)"
     />
 
-    <!-- Main Content -->
     <main class="max-w-6xl mx-auto">
       
-      <!-- AREA 1: Checklist Huruf (Tampil saat IDLE) -->
-      <div v-if="!state.isPlaying" class="bg-white p-4 md:p-6 rounded-xl shadow-sm mb-6">
-        <div class="flex justify-between items-center mb-4">
-          <h2 class="font-semibold text-slate-700">
-            Pilih Huruf 
-            <span class="ml-1 text-sm bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
-              {{ state.selectedChars.length }} / {{ state.maxCards }}
+      <FinishScreen 
+        v-if="state.lastRecord" 
+        :stats="state.lastRecord"
+        @replay="handleReset"
+        @viewHistory="isHistoryModalOpen = true"
+      />
+
+      <div v-if="!state.isPlaying && !state.lastRecord && state.timeLeft > 0" class="bg-white p-3 sm:p-4 md:p-6 rounded-xl shadow-sm mb-6">
+        
+        <!-- Header Checklist + Filter -->
+        <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-4">
+          <h2 class="font-semibold text-slate-700 text-sm sm:text-base">
+            Pilih {{ state.mode === 'char' ? 'Huruf' : 'Kata' }}
+            <span class="ml-1 text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
+              {{ state.selectedItems.length }} / {{ state.mode === 'char' ? state.maxChars : state.maxWords }}
             </span>
           </h2>
+
+          <!-- Tombol Filter (Mobile) -->
+          <button 
+            @click="isRowFilterModalOpen = true"
+            class="sm:hidden flex items-center gap-1 text-sm bg-slate-100 text-slate-600 px-3 py-1.5 rounded-lg hover:bg-slate-200"
+          >
+            <Filter :size="14" /> 
+            {{ mobileFilterLabel }}
+          </button>
+
+          <!-- Chip Filter (Desktop/Tablet) - Multi-select -->
+          <div class="hidden sm:flex flex-wrap gap-1">
+            <button
+              v-for="chip in desktopChips"
+              :key="chip.value"
+              @click="handleToggleRow(chip.value)"
+              class="px-2 py-1 rounded-md text-xs font-medium transition-colors border"
+              :class="(chip.value === 'all' 
+                ? state.selectedRows.length === 11 
+                : state.selectedRows.includes(chip.value))
+                ? 'bg-blue-100 text-blue-700 border-blue-300' 
+                : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'"
+            >
+              {{ chip.label }}
+            </button>
+          </div>
         </div>
         
-        <div class="flex flex-wrap gap-2">
+        <div class="flex flex-wrap gap-1.5 sm:gap-2">
           <button
-            v-for="char in HIRAGANA_DATA"
-            :key="char.id"
-            @click="handleToggleChar(char)"
-            :disabled="isDisabled(char.id)"
-            class="w-12 h-12 rounded-lg border-2 font-bold text-xl transition-all duration-200"
+            v-for="item in currentData"
+            :key="item.id"
+            @click="handleToggleItem(item)"
+            :disabled="isDisabled(item.id)"
+            class="rounded-lg border-2 font-bold transition-all duration-200"
             :class="[
-              isSelected(char.id) 
+              state.mode === 'char' ? 'w-10 h-10 sm:w-12 sm:h-12 text-lg sm:text-xl' : 'px-2 py-1.5 sm:px-3 sm:py-2 text-sm sm:text-base',
+              isSelected(item.id) 
                 ? 'border-blue-500 bg-blue-50 text-blue-600 shadow-sm' 
                 : 'border-slate-200 text-slate-600 hover:border-slate-300 bg-white',
-              isDisabled(char.id) ? 'opacity-30 cursor-not-allowed' : ''
+              isDisabled(item.id) ? 'opacity-30 cursor-not-allowed' : ''
             ]"
           >
-            {{ char.char }}
+            {{ item.text }}
           </button>
         </div>
       </div>
 
-      <!-- AREA 2: Grid Kartu (Tampil saat PLAYING) -->
       <div 
-        v-if="state.isPlaying && state.timeLeft > 0" 
+        v-if="state.isPlaying" 
         class="grid gap-2 md:gap-4 animate-in fade-in slide-in-from-bottom-4 duration-500"
         :class="gridClass"
       >
         <HiraganaItem 
-          v-for="card in state.activeCards" 
-          :key="card.id" 
-          :data="card" 
+          v-for="item in state.activeItems" 
+          :key="item.id" 
+          :data="item" 
           :show-romaji="state.showRomaji"
           :use-card-style="state.useCardStyle"
           :class="fontClass"
         />
       </div>
 
-      <!-- AREA 3: Waktu Habis (Tampil saat FINISHED) -->
-      <div v-if="state.isPlaying && state.timeLeft === 0" class="text-center mt-12 animate-in fade-in zoom-in duration-300">
-        <div class="inline-block bg-white p-8 rounded-2xl shadow-lg">
-          <h2 class="text-3xl font-bold text-slate-800 mb-2">Waktu Habis! ⏰</h2>
-          <p class="text-slate-500 mb-6">Latihan selesai.</p>
+      <div v-if="!state.isPlaying && !state.lastRecord && state.timeLeft === 0 && state.timerMode === 'countdown'" class="text-center mt-12 animate-in fade-in zoom-in duration-300">
+        <div class="inline-block bg-white p-6 sm:p-8 rounded-2xl shadow-lg">
+          <h2 class="text-2xl sm:text-3xl font-bold text-slate-800 mb-2">Waktu Habis! ⏰</h2>
+          <p class="text-slate-500 mb-6 text-sm sm:text-base">Latihan gagal (tidak disimpan).</p>
           <button 
             @click="handleReset" 
-            class="bg-blue-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors shadow-md shadow-blue-200"
+            class="bg-blue-600 text-white px-6 sm:px-8 py-2 sm:py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors shadow-md shadow-blue-200"
           >
             Main Lagi
           </button>
         </div>
       </div>
 
+      <div v-if="!state.isPlaying && !state.lastRecord && state.timeLeft > 0" class="mt-8 text-center animate-in fade-in duration-500">
+        <button @click="isHistoryModalOpen = true" class="inline-flex items-center gap-2 bg-white px-4 py-2 rounded-xl shadow-sm border border-gray-100 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors">
+          📜 History ({{ state.history.length }})
+          <span v-if="personalBest" class="text-yellow-600 bg-yellow-50 px-2 py-0.5 rounded text-xs font-bold">🏆 Rekor: {{ (personalBest / 1000).toFixed(2) }}s/item</span>
+        </button>
+      </div>
+
     </main>
 
-    <!-- Modal Kustom -->
     <AppModal 
       :is-open="isModalOpen" 
       title="Peringatan" 
-      message="Pilih minimal satu huruf sebelum memulai latihan!"
+      message="Pilih minimal satu item sebelum memulai latihan!"
       @close="isModalOpen = false"
+    />
+
+    <SelectModal 
+      :is-open="isFilterModalOpen"
+      title="Filter Panjang Kata"
+      :options="filterOptions"
+      :selected-value="state.wordLengthFilter"
+      @close="isFilterModalOpen = false"
+      @select="handleSelectFilter"
+    />
+
+    <HistoryModal 
+      :is-open="isHistoryModalOpen" 
+      :history="state.history" 
+      @close="isHistoryModalOpen = false"
+      @delete="handleDeleteHistory"
+      @clearAll="handleClearAllHistory"
+      @open-export="isExportModalOpen = true"
+    />
+
+    <ExportModal 
+      :is-open="isExportModalOpen"
+      :history="state.history"
+      @close="isExportModalOpen = false"
+      @export="handleExport"
+    />
+
+    <ConfirmModal 
+      :is-open="isRestartModalOpen"
+      title="Mulai Ulang Latihan?"
+      message="Timer akan direset dan urutan kartu akan diacak ulang (jika mode acak aktif). Latihan saat ini tidak akan disimpan."
+      confirmText="Ya, Mulai Ulang"
+      cancelText="Batal"
+      confirmColor="orange"
+      :icon="RotateCcw"
+      @close="isRestartModalOpen = false"
+      @confirm="confirmRestart"
+    />
+
+    <!-- Modal Filter Baris BARU (Multi-select) -->
+    <RowFilterModal 
+      :is-open="isRowFilterModalOpen"
+      :selected-rows="state.selectedRows"
+      :is-word-mode="state.mode === 'word'"
+      @close="isRowFilterModalOpen = false"
+      @toggle="handleToggleRow"
     />
   </div>
 </template>
@@ -216,10 +506,10 @@ const gridClass = computed(() => {
 ===== src/components/HiraganaItem.vue =====
 <!-- src/components/HiraganaItem.vue -->
 <script setup lang="ts">
-import type { HiraganaChar } from '../types';
+import type { StudyItem } from '../types';
 
 defineProps<{
-  data: HiraganaChar;
+  data: StudyItem;
   showRomaji: boolean;
   useCardStyle: boolean;
 }>();
@@ -227,19 +517,19 @@ defineProps<{
 
 <template>
   <div 
-    class="flex flex-col items-center justify-center transition-all duration-300 select-none p-2"
+    class="flex flex-col items-center justify-center transition-all duration-300 select-none p-1 sm:p-2 min-w-0"
     :class="[
       useCardStyle 
         ? 'bg-white shadow-md rounded-xl border border-gray-100 aspect-square hover:scale-105' 
         : 'bg-transparent border-none shadow-none'
     ]"
   >
-    <span class="text-3xl md:text-4xl lg:text-5xl font-bold text-gray-800">{{ data.char }}</span>
+    <span class="text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-bold text-gray-800 w-full text-center px-1 truncate">{{ data.text }}</span>
     <span 
-      class="text-xs md:text-sm lg:text-base text-gray-500 mt-1 transition-opacity duration-200"
+      class="text-[10px] sm:text-xs md:text-sm lg:text-base text-gray-500 mt-0.5 sm:mt-1 transition-opacity duration-200 text-center w-full px-1 truncate"
       :class="showRomaji ? 'opacity-100' : 'opacity-0'"
     >
-      {{ data.romaji }}
+      {{ data.romaji }} <span v-if="data.meaning" class="text-gray-400 hidden sm:inline">({{ data.meaning }})</span>
     </span>
   </div>
 </template>
@@ -294,24 +584,31 @@ const emit = defineEmits<{
 ===== src/components/AppToolbar.vue =====
 <!-- src/components/AppToolbar.vue -->
 <script setup lang="ts">
-import { Play, LayoutGrid, AlignJustify, Timer } from 'lucide-vue-next';
-import type { GameState } from '../types';
+import { Play, Pause, Check, LayoutGrid, AlignJustify, Timer, Filter, RotateCcw } from 'lucide-vue-next';
+import type { GameState, TimerMode } from '../types';
 
 defineProps<{
   state: GameState;
+  maxAvailable: number;
   onStart: () => void;
+  onStop: () => void;
+  onTogglePause: () => void;
+  onRestart: () => void;
 }>();
 
 const emit = defineEmits<{
-  (e: 'update:maxCards', val: number): void;
+  (e: 'update:maxItems', val: number): void;
   (e: 'update:timeInput', val: number): void;
   (e: 'toggleRomaji'): void;
   (e: 'toggleCardStyle'): void;
-  (e: 'toggleAutoShuffle'): void;
+  (e: 'toggleShuffle'): void;
+  (e: 'openFilterModal'): void;
+  (e: 'setTimerMode', mode: TimerMode): void;
 }>();
 
-const handleMaxCardsChange = (e: Event) => {
-  emit('update:maxCards', Number((e.target as HTMLSelectElement).value));
+const handleMaxItemsChange = (e: Event) => {
+  const val = Number((e.target as HTMLInputElement).value);
+  if (val > 0) emit('update:maxItems', val);
 };
 
 const handleTimeInputChange = (e: Event) => {
@@ -320,80 +617,146 @@ const handleTimeInputChange = (e: Event) => {
 </script>
 
 <template>
-  <div class="bg-white p-4 rounded-xl shadow-sm mb-6 flex flex-wrap gap-4 items-center justify-center max-w-5xl mx-auto">
+  <div class="bg-white p-3 sm:p-4 rounded-xl shadow-sm mb-6 flex flex-wrap gap-3 sm:gap-4 items-center justify-center max-w-5xl mx-auto">
     
-    <!-- Pilih Jumlah -->
-    <select 
-      :value="state.maxCards" 
-      @change="handleMaxCardsChange"
-      :disabled="state.isPlaying"
-      class="border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none disabled:opacity-50 disabled:bg-gray-100"
-    >
-      <option v-for="num in [5, 10, 15, 20, 25, 46]" :key="num" :value="num">
-        {{ num }} Huruf
-      </option>
-    </select>
-
-    <!-- Input Timer -->
+    <!-- Input Jumlah -->
     <div class="flex items-center gap-1 border border-gray-300 rounded-lg px-2 bg-gray-50" :class="{ 'opacity-50': state.isPlaying }">
+      <span class="text-xs font-semibold text-gray-500">Jml</span>
+      <input 
+        type="number" 
+        :value="state.mode === 'char' ? state.maxChars : state.maxWords" 
+        @change="handleMaxItemsChange"
+        :disabled="state.isPlaying"
+        class="w-12 sm:w-14 p-2 bg-transparent outline-none text-center text-sm font-bold text-gray-700"
+        min="1"
+        :max="maxAvailable"
+      />
+    </div>
+
+    <!-- Toggle Timer Mode -->
+    <div class="flex items-center border border-gray-300 rounded-lg p-1 bg-gray-50" :class="{ 'opacity-50': state.isPlaying }">
+      <button 
+        @click="emit('setTimerMode', 'countdown')"
+        :disabled="state.isPlaying"
+        class="px-2 py-1 rounded text-xs font-medium transition-colors"
+        :class="state.timerMode === 'countdown' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500 hover:text-gray-700'"
+      >
+        Countdown
+      </button>
+      <button 
+        @click="emit('setTimerMode', 'stopwatch')"
+        :disabled="state.isPlaying"
+        class="px-2 py-1 rounded text-xs font-medium transition-colors"
+        :class="state.timerMode === 'stopwatch' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500 hover:text-gray-700'"
+      >
+        Stopwatch
+      </button>
+    </div>
+
+    <!-- Input Timer (Hanya Countdown) -->
+    <div v-if="state.timerMode === 'countdown'" class="flex items-center gap-1 border border-gray-300 rounded-lg px-2 bg-gray-50" :class="{ 'opacity-50': state.isPlaying }">
       <Timer :size="16" class="text-gray-500" />
       <input 
         type="number" 
         :value="state.timeInput" 
         @change="handleTimeInputChange"
         :disabled="state.isPlaying"
-        class="w-14 p-2 bg-transparent outline-none text-center text-sm"
+        class="w-12 sm:w-14 p-2 bg-transparent outline-none text-center text-sm"
         min="5"
       />
       <span class="text-gray-500 text-xs">dtk</span>
     </div>
 
-    <!-- Tombol Mulai -->
+    <!-- TOMBOL DINAMIS -->
+    <template v-if="!state.isPlaying">
+      <button 
+        @click="onStart" 
+        class="flex items-center gap-1 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
+      >
+        <Play :size="16" /> Mulai
+      </button>
+    </template>
+
+    <template v-else>
+      <!-- Tombol Restart (Mulai Ulang) -->
+      <button 
+        @click="onRestart" 
+        :disabled="state.timerMode === 'countdown' && state.timeLeft === 0"
+        class="flex items-center gap-1 bg-orange-500 text-white px-3 py-2 rounded-lg hover:bg-orange-600 transition-colors text-sm font-medium disabled:opacity-50"
+        title="Mulai Ulang"
+      >
+        <RotateCcw :size="16" />
+      </button>
+
+      <button 
+        @click="onTogglePause" 
+        class="flex items-center gap-1 text-white px-4 py-2 rounded-lg transition-colors text-sm font-medium"
+        :class="state.isPaused ? 'bg-green-600 hover:bg-green-700' : 'bg-yellow-500 hover:bg-yellow-600'"
+      >
+        <component :is="state.isPaused ? Play : Pause" :size="16" /> 
+        {{ state.isPaused ? 'Resume' : 'Pause' }}
+      </button>
+
+      <button 
+        @click="onStop" 
+        class="flex items-center gap-1 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors text-sm font-medium"
+      >
+        <Check :size="16" /> Selesai
+      </button>
+    </template>
+
+    <!-- Tombol Filter Kata -->
     <button 
-      @click="onStart" 
+      v-if="state.mode === 'word'"
+      @click="emit('openFilterModal')"
       :disabled="state.isPlaying"
-      class="flex items-center gap-1 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors text-sm font-medium"
+      class="flex items-center gap-1 bg-purple-100 text-purple-700 px-3 py-2 rounded-lg hover:bg-purple-200 transition-colors text-sm font-medium disabled:opacity-50"
     >
-      <Play :size="16" /> Mulai
+      <Filter :size="16" /> 
+      {{ state.wordLengthFilter === 'all' ? 'Semua Kata' : state.wordLengthFilter + ' Huruf' }}
     </button>
 
     <div class="h-6 w-px bg-gray-300 mx-1 hidden md:block"></div>
 
-    <!-- TOGGLE SWITCH: Auto Shuffle -->
+    <!-- TOGGLE SWITCH: Acak -->
     <label class="flex items-center gap-2 cursor-pointer select-none">
-      <span class="text-sm font-medium text-gray-700">Auto Acak</span>
+      <span class="text-xs sm:text-sm font-medium text-gray-700">Acak</span>
       <div class="relative">
         <input 
           type="checkbox" 
           class="sr-only" 
-          :checked="state.isAutoShuffle"
-          @change="emit('toggleAutoShuffle')"
-          :disabled="!state.isPlaying"
+          :checked="state.isShuffleEnabled"
+          @change="emit('toggleShuffle')"
+          :disabled="state.isPlaying"
         >
         <div 
           class="w-10 h-5 rounded-full transition-colors duration-200"
-          :class="[state.isAutoShuffle ? 'bg-orange-500' : 'bg-gray-300', !state.isPlaying ? 'opacity-50' : '']"
+          :class="[state.isShuffleEnabled ? 'bg-orange-500' : 'bg-gray-300', state.isPlaying ? 'opacity-50' : '']"
         ></div>
         <div 
           class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white transition-transform duration-200 shadow-sm"
-          :class="state.isAutoShuffle ? 'translate-x-5' : 'translate-x-0'"
+          :class="state.isShuffleEnabled ? 'translate-x-5' : 'translate-x-0'"
         ></div>
       </div>
     </label>
 
     <!-- TOGGLE SWITCH: Romaji -->
     <label class="flex items-center gap-2 cursor-pointer select-none">
-      <span class="text-sm font-medium text-gray-700">Romaji</span>
+      <span class="text-xs sm:text-sm font-medium text-gray-700">Romaji</span>
       <div class="relative">
         <input 
           type="checkbox" 
           class="sr-only" 
           :checked="state.showRomaji"
           @change="emit('toggleRomaji')"
+          :disabled="state.isPlaying && !state.isPaused"
         >
         <div 
           class="w-10 h-5 rounded-full transition-colors duration-200"
-          :class="state.showRomaji ? 'bg-blue-500' : 'bg-gray-300'"
+          :class="[
+            state.showRomaji ? 'bg-blue-500' : 'bg-gray-300',
+            (state.isPlaying && !state.isPaused) ? 'opacity-50' : ''
+          ]"
         ></div>
         <div 
           class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white transition-transform duration-200 shadow-sm"
@@ -413,11 +776,563 @@ const handleTimeInputChange = (e: Event) => {
 
   </div>
 </template>
+===== src/components/FinishScreen.vue =====
+<!-- src/components/FinishScreen.vue -->
+<script setup lang="ts">
+import { Trophy, RotateCcw, History } from 'lucide-vue-next';
+import type { HistoryEntry } from '../types';
+
+defineProps<{
+  stats: HistoryEntry;
+}>();
+
+const emit = defineEmits<{
+  (e: 'replay'): void;
+  (e: 'viewHistory'): void;
+}>();
+
+// Helper format waktu
+const formatTime = (ms: number) => {
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  const mm = Math.floor(ms % 1000);
+  return `${m > 0 ? m + ':' : ''}${s.toString().padStart(2, '0')}.${mm.toString().padStart(3, '0')}s`;
+};
+</script>
+
+<template>
+  <div class="text-center mt-8 animate-in fade-in zoom-in duration-300">
+    <div class="inline-block bg-white p-6 sm:p-8 rounded-2xl shadow-lg max-w-sm w-full mx-auto">
+      
+      <h2 class="text-3xl font-bold text-slate-800 mb-2">Selesai! 🏁</h2>
+      
+      <!-- Badge PB -->
+      <div v-if="stats.isPersonalBest" class="inline-flex items-center gap-1 bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full text-sm font-bold mb-4 shadow-sm">
+        <Trophy :size="16" /> Rekor Baru!
+      </div>
+
+      <!-- Statistik Utama -->
+      <div class="bg-slate-50 rounded-xl p-4 mb-6">
+        <p class="text-sm text-slate-500 mb-1">Total Waktu</p>
+        <p class="text-3xl font-mono font-bold text-blue-600 mb-3">{{ formatTime(stats.durationMs) }}</p>
+        
+        <div class="flex justify-between text-sm border-t border-slate-200 pt-2">
+          <span class="text-slate-500">Rata-rata / item</span>
+          <span class="font-mono font-bold text-slate-700">{{ (stats.avgMsPerItem / 1000).toFixed(2) }}s</span>
+        </div>
+        <div class="flex justify-between text-sm mt-1">
+          <span class="text-slate-500">Jumlah item</span>
+          <span class="font-bold text-slate-700">{{ stats.itemCount }} item</span>
+        </div>
+      </div>
+
+      <!-- Tombol Aksi -->
+      <div class="flex flex-col gap-2">
+        <button @click="emit('replay')" class="flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors w-full">
+          <RotateCcw :size="18" /> Main Lagi
+        </button>
+        <button @click="emit('viewHistory')" class="flex items-center justify-center gap-2 bg-gray-100 text-gray-700 px-4 py-3 rounded-xl font-bold hover:bg-gray-200 transition-colors w-full">
+          <History :size="18" /> Lihat Semua History
+        </button>
+      </div>
+      
+    </div>
+  </div>
+</template>
+===== src/components/HistoryModal.vue =====
+<!-- src/components/HistoryModal.vue -->
+<script setup lang="ts">
+import { ref } from 'vue';
+import { X, Trash2, ChevronDown, ChevronUp, Trophy, Download } from 'lucide-vue-next';
+import type { HistoryEntry } from '../types';
+
+defineProps<{
+  isOpen: boolean;
+  history: HistoryEntry[];
+}>();
+
+const emit = defineEmits<{
+  (e: 'close'): void;
+  (e: 'delete', id: number): void;
+  (e: 'clearAll'): void;
+  (e: 'openExport'): void; // Emit baru
+}>();
+
+const expandedId = ref<number | null>(null);
+
+const toggleExpand = (id: number | undefined) => {
+  if (!id) return;
+  expandedId.value = expandedId.value === id ? null : id;
+};
+
+const formatDate = (ts: number) => {
+  const d = new Date(ts);
+  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+};
+
+const formatTime = (ms: number) => {
+  return (ms / 1000).toFixed(3) + 's';
+};
+</script>
+
+<template>
+  <Teleport to="body">
+    <Transition name="fade">
+      <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-4">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[85vh] flex flex-col overflow-hidden">
+          
+          <!-- Header -->
+          <div class="flex justify-between items-center p-4 border-b border-gray-100">
+            <h3 class="font-bold text-lg text-gray-800">Riwayat Latihan</h3>
+            <div class="flex items-center gap-2">
+              <button @click="emit('openExport')" class="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium px-2 py-1 bg-blue-50 rounded">
+                <Download :size="12" /> Ekspor
+              </button>
+              <button @click="emit('clearAll')" class="text-xs text-red-500 hover:text-red-700 font-medium px-2 py-1 bg-red-50 rounded">Hapus Semua</button>
+              <button @click="emit('close')" class="p-1 hover:bg-gray-100 rounded-full transition-colors">
+                <X :size="20" class="text-gray-500" />
+              </button>
+            </div>
+          </div>
+
+          <!-- List History -->
+          <div class="overflow-y-auto p-2 flex-1">
+            <div v-if="history.length === 0" class="text-center text-gray-500 py-8 text-sm">
+              Belum ada riwayat latihan.
+            </div>
+
+            <div v-for="entry in history" :key="entry.id" class="mb-2 border border-gray-100 rounded-lg overflow-hidden transition-all">
+              <div @click="toggleExpand(entry.id)" class="flex items-center justify-between p-3 cursor-pointer hover:bg-gray-50">
+                <div class="flex-1">
+                  <div class="flex items-center gap-2 mb-1">
+                    <span class="font-bold text-gray-800 text-sm">{{ formatDate(entry.timestamp) }}</span>
+                    <span class="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">
+                      {{ entry.mode === 'char' ? 'Huruf' : 'Kata' }}
+                    </span>
+                    <span class="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">
+                      {{ entry.timerMode === 'stopwatch' ? '⏱' : '⏳' }}
+                    </span>
+                  </div>
+                  <div class="text-xs text-gray-500">
+                    {{ entry.itemCount }} item · {{ formatTime(entry.durationMs) }} · 
+                    <span class="font-medium text-gray-700">{{ (entry.avgMsPerItem / 1000).toFixed(2) }}s/item</span>
+                  </div>
+                </div>
+                
+                <div class="flex items-center gap-2">
+                  <Trophy v-if="entry.isPersonalBest" :size="16" class="text-yellow-500" />
+                  <button @click.stop="entry.id && emit('delete', entry.id)" class="p-1 text-red-400 hover:text-red-600">
+                    <Trash2 :size="14" />
+                  </button>
+                  <component :is="expandedId === entry.id ? ChevronUp : ChevronDown" :size="16" class="text-gray-400" />
+                </div>
+              </div>
+
+              <div v-if="expandedId === entry.id" class="bg-slate-50 p-3 border-t border-gray-100">
+                <p class="text-xs text-gray-500 mb-2 font-medium">Item yang dibaca:</p>
+                <div class="flex flex-wrap gap-2">
+                  <span v-for="(item, idx) in entry.items" :key="idx" class="px-2 py-1 bg-white border border-gray-200 rounded text-sm text-gray-700 font-medium shadow-sm">
+                    {{ item.text }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
+</template>
+
+<style scoped>
+.fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+</style>
+===== src/components/SelectModal.vue =====
+<!-- src/components/SelectModal.vue -->
+<script setup lang="ts">
+import { X, Check } from 'lucide-vue-next';
+
+interface Option {
+  label: string;
+  value: string;
+}
+
+defineProps<{
+  isOpen: boolean;
+  title: string;
+  options: Option[];
+  selectedValue: string;
+}>();
+
+const emit = defineEmits<{
+  (e: 'close'): void;
+  (e: 'select', value: string): void;
+}>();
+</script>
+
+<template>
+  <Teleport to="body">
+    <Transition name="fade">
+      <div 
+        v-if="isOpen" 
+        class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4"
+        @click.self="emit('close')"
+      >
+        <div class="bg-white rounded-t-2xl sm:rounded-xl shadow-2xl w-full max-w-sm overflow-hidden transform transition-all">
+          
+          <div class="flex justify-between items-center p-4 border-b border-gray-100">
+            <h3 class="font-bold text-lg text-gray-800">{{ title }}</h3>
+            <button @click="emit('close')" class="p-1 hover:bg-gray-100 rounded-full transition-colors">
+              <X :size="20" class="text-gray-500" />
+            </button>
+          </div>
+          
+          <div class="p-2 max-h-[60vh] overflow-y-auto">
+            <button
+              v-for="opt in options"
+              :key="opt.value"
+              @click="emit('select', opt.value)"
+              class="w-full flex items-center justify-between p-4 mb-1 rounded-lg transition-colors"
+              :class="selectedValue === opt.value ? 'bg-blue-50 text-blue-700' : 'hover:bg-gray-50 text-gray-700'"
+            >
+              <span class="font-medium">{{ opt.label }}</span>
+              <Check v-if="selectedValue === opt.value" :size="20" class="text-blue-600" />
+            </button>
+          </div>
+          
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
+</template>
+
+<style scoped>
+.fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+</style>
+===== src/components/ExportModal.vue =====
+<!-- src/components/ExportModal.vue -->
+<script setup lang="ts">
+import { ref, computed } from 'vue';
+import { X, Download, FileJson, FileSpreadsheet } from 'lucide-vue-next';
+import type { HistoryEntry } from '../types';
+
+const props = defineProps<{
+  isOpen: boolean;
+  history: HistoryEntry[];
+}>();
+
+const emit = defineEmits<{
+  (e: 'close'): void;
+  (e: 'export', payload: { format: 'csv' | 'json'; filter: FilterType; filteredHistory: HistoryEntry[] }): void;
+}>();
+
+type FilterType = 'all' | 'char' | 'word' | 'countdown' | 'stopwatch';
+
+const selectedFormat = ref<'csv' | 'json'>('csv');
+const selectedFilter = ref<FilterType>('all');
+
+const filterOptions: { label: string; value: FilterType }[] = [
+  { label: 'Semua History', value: 'all' },
+  { label: 'Hanya Mode Huruf', value: 'char' },
+  { label: 'Hanya Mode Kata', value: 'word' },
+  { label: 'Hanya Countdown', value: 'countdown' },
+  { label: 'Hanya Stopwatch', value: 'stopwatch' },
+];
+
+const filteredHistory = computed(() => {
+  if (selectedFilter.value === 'all') return props.history;
+  if (selectedFilter.value === 'char') return props.history.filter(h => h.mode === 'char');
+  if (selectedFilter.value === 'word') return props.history.filter(h => h.mode === 'word');
+  if (selectedFilter.value === 'countdown') return props.history.filter(h => h.timerMode === 'countdown');
+  if (selectedFilter.value === 'stopwatch') return props.history.filter(h => h.timerMode === 'stopwatch');
+  return props.history;
+});
+
+const handleExport = () => {
+  emit('export', {
+    format: selectedFormat.value,
+    filter: selectedFilter.value,
+    filteredHistory: filteredHistory.value
+  });
+};
+</script>
+
+<template>
+  <Teleport to="body">
+    <Transition name="fade">
+      <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+          
+          <!-- Header -->
+          <div class="flex justify-between items-center p-4 border-b border-gray-100">
+            <h3 class="font-bold text-lg text-gray-800">Ekspor History</h3>
+            <button @click="emit('close')" class="p-1 hover:bg-gray-100 rounded-full transition-colors">
+              <X :size="20" class="text-gray-500" />
+            </button>
+          </div>
+
+          <div class="p-4 space-y-4">
+            
+            <!-- Format -->
+            <div>
+              <p class="text-sm font-semibold text-gray-700 mb-2">Format</p>
+              <div class="grid grid-cols-2 gap-2">
+                <button
+                  @click="selectedFormat = 'csv'"
+                  class="flex items-center justify-center gap-2 p-3 rounded-lg border-2 transition-colors"
+                  :class="selectedFormat === 'csv' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-gray-300'"
+                >
+                  <FileSpreadsheet :size="18" /> CSV
+                </button>
+                <button
+                  @click="selectedFormat = 'json'"
+                  class="flex items-center justify-center gap-2 p-3 rounded-lg border-2 transition-colors"
+                  :class="selectedFormat === 'json' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-gray-300'"
+                >
+                  <FileJson :size="18" /> JSON
+                </button>
+              </div>
+            </div>
+
+            <!-- Filter -->
+            <div>
+              <p class="text-sm font-semibold text-gray-700 mb-2">Filter Data</p>
+              <div class="space-y-1">
+                <button
+                  v-for="opt in filterOptions"
+                  :key="opt.value"
+                  @click="selectedFilter = opt.value"
+                  class="w-full flex items-center justify-between p-2.5 rounded-lg text-sm transition-colors"
+                  :class="selectedFilter === opt.value ? 'bg-blue-50 text-blue-700 font-medium' : 'hover:bg-gray-50 text-gray-700'"
+                >
+                  <span>{{ opt.label }}</span>
+                  <span class="text-xs text-gray-400">
+                    {{ opt.value === 'all' ? history.length : 
+                       opt.value === 'char' ? history.filter(h => h.mode === 'char').length :
+                       opt.value === 'word' ? history.filter(h => h.mode === 'word').length :
+                       opt.value === 'countdown' ? history.filter(h => h.timerMode === 'countdown').length :
+                       history.filter(h => h.timerMode === 'stopwatch').length }}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Preview -->
+            <div class="bg-slate-50 rounded-lg p-3 text-sm">
+              <p class="text-gray-600">
+                Akan mengekspor <strong class="text-blue-600">{{ filteredHistory.length }} entri</strong> 
+                dalam format <strong class="text-blue-600 uppercase">{{ selectedFormat }}</strong>.
+              </p>
+            </div>
+
+          </div>
+
+          <!-- Footer -->
+          <div class="p-4 border-t border-gray-100 flex gap-2">
+            <button
+              @click="emit('close')"
+              class="flex-1 bg-gray-100 text-gray-700 px-4 py-2.5 rounded-lg hover:bg-gray-200 transition-colors font-medium"
+            >
+              Batal
+            </button>
+            <button
+              @click="handleExport"
+              :disabled="filteredHistory.length === 0"
+              class="flex-1 flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:opacity-50"
+            >
+              <Download :size="16" /> Ekspor
+            </button>
+          </div>
+
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
+</template>
+
+<style scoped>
+.fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+</style>
+===== src/components/ConfirmModal.vue =====
+<!-- src/components/ConfirmModal.vue -->
+<script setup lang="ts">
+import { AlertTriangle } from 'lucide-vue-next';
+import type { Component } from 'vue';
+
+defineProps<{
+  isOpen: boolean;
+  title: string;
+  message: string;
+  confirmText?: string;
+  cancelText?: string;
+  confirmColor?: 'red' | 'orange' | 'blue' | 'green';
+  icon?: Component;
+}>();
+
+const emit = defineEmits<{
+  (e: 'close'): void;
+  (e: 'confirm'): void;
+}>();
+
+// Helper untuk warna tombol
+const getConfirmColorClass = (color: string) => {
+  switch (color) {
+    case 'red': return 'bg-red-600 hover:bg-red-700';
+    case 'orange': return 'bg-orange-500 hover:bg-orange-600';
+    case 'green': return 'bg-green-600 hover:bg-green-700';
+    default: return 'bg-blue-600 hover:bg-blue-700';
+  }
+};
+</script>
+
+<template>
+  <Teleport to="body">
+    <Transition name="modal">
+      <div 
+        v-if="isOpen" 
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+        @click.self="emit('close')"
+      >
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border border-white/20 transform transition-all">
+          
+          <!-- Icon -->
+          <div class="pt-6 flex justify-center">
+            <div class="w-16 h-16 rounded-full flex items-center justify-center bg-orange-100 text-orange-600">
+              <component :is="icon || AlertTriangle" :size="32" />
+            </div>
+          </div>
+
+          <!-- Body -->
+          <div class="p-5 text-center">
+            <h3 class="text-xl font-bold text-slate-800 mb-2">{{ title }}</h3>
+            <p class="text-slate-500 text-sm leading-relaxed">{{ message }}</p>
+          </div>
+
+          <!-- Footer -->
+          <div class="p-4 bg-slate-50 flex gap-2">
+            <button 
+              @click="emit('close')" 
+              class="flex-1 bg-white border border-gray-200 text-gray-700 px-4 py-2.5 rounded-xl hover:bg-gray-50 transition-colors font-medium active:scale-95"
+            >
+              {{ cancelText || 'Batal' }}
+            </button>
+            <button 
+              @click="emit('confirm')" 
+              class="flex-1 text-white px-4 py-2.5 rounded-xl transition-colors font-medium active:scale-95 flex items-center justify-center gap-2"
+              :class="getConfirmColorClass(confirmColor || 'blue')"
+            >
+              {{ confirmText || 'Ya' }}
+            </button>
+          </div>
+
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
+</template>
+
+<style scoped>
+.modal-enter-active, .modal-leave-active {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.modal-enter-from, .modal-leave-to {
+  opacity: 0;
+}
+.modal-enter-from .bg-white, .modal-leave-to .bg-white {
+  transform: scale(0.95) translateY(10px);
+}
+</style>
+===== src/components/RowFilterModal.vue =====
+<!-- src/components/RowFilterModal.vue -->
+<script setup lang="ts">
+import { X, Check } from 'lucide-vue-next';
+import type { RowType } from '../types';
+
+defineProps<{
+  isOpen: boolean;
+  selectedRows: RowType[];
+  isWordMode: boolean;
+}>();
+
+const emit = defineEmits<{
+  (e: 'close'): void;
+  (e: 'toggle', row: RowType): void;
+}>();
+
+const charRows: { label: string; value: RowType }[] = [
+  { label: 'Semua Huruf', value: 'all' },
+  { label: 'Baris A (あ-お)', value: 'a' },
+  { label: 'Baris K (か-こ)', value: 'k' },
+  { label: 'Baris S (さ-そ)', value: 's' },
+  { label: 'Baris T (た-と)', value: 't' },
+  { label: 'Baris N (な-の)', value: 'n' },
+  { label: 'Baris H (は-ほ)', value: 'h' },
+  { label: 'Baris M (ま-も)', value: 'm' },
+  { label: 'Baris Y (や-よ)', value: 'y' },
+  { label: 'Baris R (ら-ろ)', value: 'r' },
+  { label: 'Baris W (わ-を)', value: 'w' },
+  { label: 'Huruf N (ん)', value: 'nn' },
+];
+
+const wordRows: { label: string; value: RowType }[] = [
+  { label: 'Semua Kata', value: 'all' },
+];
+
+// Cek apakah baris aktif (untuk 'all', aktif jika semua baris terpilih)
+const isActive = (row: RowType, selected: RowType[]) => {
+  if (row === 'all') {
+    return selected.length === 11; // Total 11 baris (a sampai nn)
+  }
+  return selected.includes(row);
+};
+</script>
+
+<template>
+  <Teleport to="body">
+    <Transition name="fade">
+      <div v-if="isOpen" class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4" @click.self="emit('close')">
+        <div class="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden transform transition-all">
+          
+          <div class="flex justify-between items-center p-4 border-b border-gray-100">
+            <h3 class="font-bold text-lg text-gray-800">Pilih Filter</h3>
+            <button @click="emit('close')" class="p-1 hover:bg-gray-100 rounded-full transition-colors">
+              <X :size="20" class="text-gray-500" />
+            </button>
+          </div>
+          
+          <div class="p-2 max-h-[60vh] overflow-y-auto">
+            <button
+              v-for="opt in (isWordMode ? wordRows : charRows)"
+              :key="opt.value"
+              @click="emit('toggle', opt.value)"
+              class="w-full flex items-center justify-between p-3.5 mb-1 rounded-lg transition-colors"
+              :class="isActive(opt.value, selectedRows) ? 'bg-blue-50 text-blue-700' : 'hover:bg-gray-50 text-gray-700'"
+            >
+              <span class="font-medium">{{ opt.label }}</span>
+              <Check v-if="isActive(opt.value, selectedRows)" :size="20" class="text-blue-600" />
+            </button>
+          </div>
+          
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
+</template>
+
+<style scoped>
+.fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+</style>
 ===== src/main.ts =====
 // src/main.ts
 import { createApp } from 'vue';
 import App from './App.vue';
-import './style.css'; // Pastikan baris ini ada
+import './style.css';
 
 createApp(App).mount('#app');
 ===== src/style.css =====
@@ -425,67 +1340,184 @@ createApp(App).mount('#app');
 ===== src/types/index.ts =====
 // src/types/index.ts
 
-export interface HiraganaChar {
+export interface StudyItem {
   id: string;
-  char: string;
+  text: string;
   romaji: string;
+  meaning?: string;
+}
+
+export type GameMode = 'char' | 'word';
+export type WordLengthFilter = 'all' | '2' | '3' | '4+';
+export type TimerMode = 'countdown' | 'stopwatch';
+export type RowType = 'all' | 'a' | 'k' | 's' | 't' | 'n' | 'h' | 'm' | 'y' | 'r' | 'w' | 'nn';
+
+export interface HistoryEntry {
+  id?: number;
+  timestamp: number;
+  mode: GameMode;
+  timerMode: TimerMode;
+  itemCount: number;
+  wordFilter?: WordLengthFilter;
+  durationMs: number;
+  avgMsPerItem: number;
+  items: StudyItem[];
+  isPersonalBest: boolean;
 }
 
 export interface GameState {
-  maxCards: number;
-  selectedChars: HiraganaChar[];
-  activeCards: HiraganaChar[];
+  mode: GameMode;
+  maxChars: number;
+  maxWords: number;
+  wordLengthFilter: WordLengthFilter;
+  selectedRows: RowType[]; // Ubah dari selectedRow (single) ke selectedRows (array)
+  selectedItems: StudyItem[];
+  activeItems: StudyItem[];
   showRomaji: boolean;
-  useCardStyle: boolean; // Toggle untuk Card vs Plain Text
+  useCardStyle: boolean;
+  isShuffleEnabled: boolean;
   timeInput: number;
   timeLeft: number;
   isPlaying: boolean;
+  isPaused: boolean;
+  
+  timerMode: TimerMode;
+  startTimestamp: number;
+  elapsedMs: number;
+  pausedAccumMs: number;
+  pauseStartTimestamp: number;
+  history: HistoryEntry[];
+  lastRecord: HistoryEntry | null;
 
-  // Actions
-  setMaxCards: (num: number) => void;
-  toggleChar: (char: HiraganaChar) => void;
+  setMode: (mode: GameMode) => void;
+  setMaxItems: (num: number) => void;
+  setWordLengthFilter: (filter: WordLengthFilter) => void;
+  toggleRowFilter: (row: RowType) => void; // Action baru (multi-select)
+  setTimerMode: (mode: TimerMode) => void;
+  toggleItem: (item: StudyItem) => void;
   toggleRomaji: () => void;
   toggleCardStyle: () => void;
+  toggleShuffle: () => void;
   setTimeInput: (time: number) => void;
-  setActiveCards: (cards: HiraganaChar[]) => void;
+  setActiveItems: (items: StudyItem[]) => void;
   startGame: () => boolean;
   tickTimer: () => void;
+  togglePause: () => void;
   resetGame: () => void;
+  restartGame: () => void;
+  loadHistory: () => Promise<void>;
+  setHistoryData: (history: HistoryEntry[], lastRecord: HistoryEntry | null) => void;
+  stopAndSetRecord: (record: HistoryEntry) => void;
 }
 ===== src/lib/constants.ts =====
 // src/lib/constants.ts
-import type { HiraganaChar } from '../types';
+import type { StudyItem } from '../types';
 
-export const HIRAGANA_DATA: HiraganaChar[] = [
-  { id: 'a', char: 'あ', romaji: 'a' }, { id: 'i', char: 'い', romaji: 'i' },
-  { id: 'u', char: 'う', romaji: 'u' }, { id: 'e', char: 'え', romaji: 'e' },
-  { id: 'o', char: 'お', romaji: 'o' }, { id: 'ka', char: 'か', romaji: 'ka' },
-  { id: 'ki', char: 'き', romaji: 'ki' }, { id: 'ku', char: 'く', romaji: 'ku' },
-  { id: 'ke', char: 'け', romaji: 'ke' }, { id: 'ko', char: 'こ', romaji: 'ko' },
-  { id: 'sa', char: 'さ', romaji: 'sa' }, { id: 'shi', char: 'し', romaji: 'shi' },
-  { id: 'su', char: 'す', romaji: 'su' }, { id: 'se', char: 'せ', romaji: 'se' },
-  { id: 'so', char: 'そ', romaji: 'so' }, { id: 'ta', char: 'た', romaji: 'ta' },
-  { id: 'chi', char: 'ち', romaji: 'chi' }, { id: 'tsu', char: 'つ', romaji: 'tsu' },
-  { id: 'te', char: 'て', romaji: 'te' }, { id: 'to', char: 'と', romaji: 'to' },
-  { id: 'na', char: 'な', romaji: 'na' }, { id: 'ni', char: 'に', romaji: 'ni' },
-  { id: 'nu', char: 'ぬ', romaji: 'nu' }, { id: 'ne', char: 'ね', romaji: 'ne' },
-  { id: 'no', char: 'の', romaji: 'no' }, { id: 'ha', char: 'は', romaji: 'ha' },
-  { id: 'hi', char: 'ひ', romaji: 'hi' }, { id: 'fu', char: 'ふ', romaji: 'fu' },
-  { id: 'he', char: 'へ', romaji: 'he' }, { id: 'ho', char: 'ほ', romaji: 'ho' },
-  { id: 'ma', char: 'ま', romaji: 'ma' }, { id: 'mi', char: 'み', romaji: 'mi' },
-  { id: 'mu', char: 'む', romaji: 'mu' }, { id: 'me', char: 'め', romaji: 'me' },
-  { id: 'mo', char: 'も', romaji: 'mo' }, { id: 'ya', char: 'や', romaji: 'ya' },
-  { id: 'yu', char: 'ゆ', romaji: 'yu' }, { id: 'yo', char: 'よ', romaji: 'yo' },
-  { id: 'ra', char: 'ら', romaji: 'ra' }, { id: 'ri', char: 'り', romaji: 'ri' },
-  { id: 'ru', char: 'る', romaji: 'ru' }, { id: 're', char: 'れ', romaji: 're' },
-  { id: 'ro', char: 'ろ', romaji: 'ro' }, { id: 'wa', char: 'わ', romaji: 'wa' },
-  { id: 'wo', char: 'を', romaji: 'wo' }, { id: 'n', char: 'ん', romaji: 'n' },
+export const HIRAGANA_DATA: StudyItem[] = [
+  { id: 'a', text: 'あ', romaji: 'a' }, { id: 'i', text: 'い', romaji: 'i' },
+  { id: 'u', text: 'う', romaji: 'u' }, { id: 'e', text: 'え', romaji: 'e' },
+  { id: 'o', text: 'お', romaji: 'o' }, { id: 'ka', text: 'か', romaji: 'ka' },
+  { id: 'ki', text: 'き', romaji: 'ki' }, { id: 'ku', text: 'く', romaji: 'ku' },
+  { id: 'ke', text: 'け', romaji: 'ke' }, { id: 'ko', text: 'こ', romaji: 'ko' },
+  { id: 'sa', text: 'さ', romaji: 'sa' }, { id: 'shi', text: 'し', romaji: 'shi' },
+  { id: 'su', text: 'す', romaji: 'su' }, { id: 'se', text: 'せ', romaji: 'se' },
+  { id: 'so', text: 'そ', romaji: 'so' }, { id: 'ta', text: 'た', romaji: 'ta' },
+  { id: 'chi', text: 'ち', romaji: 'chi' }, { id: 'tsu', text: 'つ', romaji: 'tsu' },
+  { id: 'te', text: 'て', romaji: 'te' }, { id: 'to', text: 'と', romaji: 'to' },
+  { id: 'na', text: 'な', romaji: 'na' }, { id: 'ni', text: 'に', romaji: 'ni' },
+  { id: 'nu', text: 'ぬ', romaji: 'nu' }, { id: 'ne', text: 'ね', romaji: 'ne' },
+  { id: 'no', text: 'の', romaji: 'no' }, { id: 'ha', text: 'は', romaji: 'ha' },
+  { id: 'hi', text: 'ひ', romaji: 'hi' }, { id: 'fu', text: 'ふ', romaji: 'fu' },
+  { id: 'he', text: 'へ', romaji: 'he' }, { id: 'ho', text: 'ほ', romaji: 'ho' },
+  { id: 'ma', text: 'ま', romaji: 'ma' }, { id: 'mi', text: 'み', romaji: 'mi' },
+  { id: 'mu', text: 'む', romaji: 'mu' }, { id: 'me', text: 'め', romaji: 'me' },
+  { id: 'mo', text: 'も', romaji: 'mo' }, { id: 'ya', text: 'や', romaji: 'ya' },
+  { id: 'yu', text: 'ゆ', romaji: 'yu' }, { id: 'yo', text: 'よ', romaji: 'yo' },
+  { id: 'ra', text: 'ら', romaji: 'ra' }, { id: 'ri', text: 'り', romaji: 'ri' },
+  { id: 'ru', text: 'る', romaji: 'ru' }, { id: 're', text: 'れ', romaji: 're' },
+  { id: 'ro', text: 'ろ', romaji: 'ro' }, { id: 'wa', text: 'わ', romaji: 'wa' },
+  { id: 'wo', text: 'を', romaji: 'wo' }, { id: 'n', text: 'ん', romaji: 'n' },
+];
+
+export const WORD_DATA: StudyItem[] = [
+  // 2 Huruf
+  { id: 'ao', text: 'あお', romaji: 'ao', meaning: 'biru' },
+  { id: 'ie', text: 'いえ', romaji: 'ie', meaning: 'rumah' },
+  { id: 'ue', text: 'うえ', romaji: 'ue', meaning: 'atas' },
+  { id: 'oi', text: 'おい', romaji: 'oi', meaning: 'keponakan' },
+  { id: 'kao', text: 'かお', romaji: 'kao', meaning: 'wajah' },
+  { id: 'kiku', text: 'きく', romaji: 'kiku', meaning: 'mendengar' },
+  { id: 'koe', text: 'こえ', romaji: 'koe', meaning: 'suara' },
+  { id: 'aki', text: 'あき', romaji: 'aki', meaning: 'musim gugur' },
+  { id: 'ika', text: 'いか', romaji: 'ika', meaning: 'cumi-cumi' },
+  { id: 'eki', text: 'えき', romaji: 'eki', meaning: 'stasiun' },
+  { id: 'oka', text: 'おか', romaji: 'oka', meaning: 'bukit' },
+  { id: 'kaki', text: 'かき', romaji: 'kaki', meaning: 'kesemek' },
+  { id: 'kaku', text: 'かく', romaji: 'kaku', meaning: 'menulis' },
+  { id: 'koi', text: 'こい', romaji: 'koi', meaning: 'cinta / koi' },
+  { id: 'aka', text: 'あか', romaji: 'aka', meaning: 'merah' },
+  { id: 'asa', text: 'あさ', romaji: 'asa', meaning: 'pagi' },
+  { id: 'ashi', text: 'あし', romaji: 'ashi', meaning: 'kaki' },
+  { id: 'isu', text: 'いす', romaji: 'isu', meaning: 'kursi' },
+  { id: 'uso', text: 'うそ', romaji: 'uso', meaning: 'bohong' },
+  { id: 'kasa', text: 'かさ', romaji: 'kasa', meaning: 'payung' },
+  { id: 'kata', text: 'かた', romaji: 'kata', meaning: 'bahu' },
+  { id: 'kuchi', text: 'くち', romaji: 'kuchi', meaning: 'mulut' },
+  { id: 'kuni', text: 'くに', romaji: 'kuni', meaning: 'negara' },
+  { id: 'shio', text: 'しお', romaji: 'shio', meaning: 'garam' },
+  { id: 'sora', text: 'そら', romaji: 'sora', meaning: 'langit' },
+  { id: 'tako', text: 'たこ', romaji: 'tako', meaning: 'gurita' },
+  { id: 'tane', text: 'たね', romaji: 'tane', meaning: 'biji' },
+  { id: 'tsuki', text: 'つき', romaji: 'tsuki', meaning: 'bulan' },
+  { id: 'niku', text: 'にく', romaji: 'niku', meaning: 'daging' },
+  { id: 'neko', text: 'ねこ', romaji: 'neko', meaning: 'kucing' },
+  { id: 'noki', text: 'のき', romaji: 'noki', meaning: 'atap' },
+
+  // 3 Huruf
+  { id: 'aoi', text: 'あおい', romaji: 'aoi', meaning: 'biru (ks.)' },
+  { id: 'akai', text: 'あかい', romaji: 'akai', meaning: 'merah (ks.)' },
+  { id: 'kioku', text: 'きおく', romaji: 'kioku', meaning: 'ingatan' },
+  { id: 'kaoku', text: 'かおく', romaji: 'kaoku', meaning: 'rumah tangga' },
+  { id: 'sakana', text: 'さかな', romaji: 'sakana', meaning: 'ikan' },
+  { id: 'tamago', text: 'たまご', romaji: 'tamago', meaning: 'telur' },
+  { id: 'tokei', text: 'とけい', romaji: 'tokei', meaning: 'jam' },
+  { id: 'okashi', text: 'おかし', romaji: 'okashi', meaning: 'kue' },
+  { id: 'sumou', text: 'すもう', romaji: 'sumou', meaning: 'sumo' },
+  { id: 'chikara', text: 'ちから', romaji: 'chikara', meaning: 'kekuatan' },
+  { id: 'nakama', text: 'なかま', romaji: 'nakama', meaning: 'kawan' },
+  { id: 'nokori', text: 'のこり', romaji: 'nokori', meaning: 'sisa' },
+  { id: 'hanabi', text: 'はなび', romaji: 'hanabi', meaning: 'kembang api' },
+  { id: 'hikari', text: 'ひかり', romaji: 'hikari', meaning: 'cahaya' },
+  { id: 'futatsu', text: 'ふたつ', romaji: 'futatsu', meaning: 'dua buah' },
+  { id: 'makura', text: 'まくら', romaji: 'makura', meaning: 'bantal' },
+  { id: 'mikan', text: 'みかん', romaji: 'mikan', meaning: 'jeruk' },
+  { id: 'mukashi', text: 'むかし', romaji: 'mukashi', meaning: 'zaman dulu' },
+  { id: 'yaoya', text: 'やおや', romaji: 'yaoya', meaning: 'toko sayur' },
+  { id: 'yuuki', text: 'ゆうき', romaji: 'yuuki', meaning: 'keberanian' },
+  { id: 'rekishi', text: 'れきし', romaji: 'rekishi', meaning: 'sejarah' },
+
+  // 4+ Huruf
+  { id: 'okaasan', text: 'おかあさん', romaji: 'okaasan', meaning: 'ibu' },
+  { id: 'otousan', text: 'おとうさん', romaji: 'otousan', meaning: 'ayah' },
+  { id: 'tanoshii', text: 'たのしい', romaji: 'tanoshii', meaning: 'menyenangkan' },
+  { id: 'chiisai', text: 'ちいさい', romaji: 'chiisai', meaning: 'kecil' },
+  { id: 'tsumetai', text: 'つめたい', romaji: 'tsumetai', meaning: 'dingin' },
+  { id: 'natsuyasumi', text: 'なつやすみ', romaji: 'natsuyasumi', meaning: 'libur musim panas' },
+  { id: 'hikouki', text: 'ひこうき', romaji: 'hikouki', meaning: 'pesawat' },
+  { id: 'fuyuyasumi', text: 'ふゆやすみ', romaji: 'fuyuyasumi', meaning: 'libur musim dingin' },
+  { id: 'hoshizora', text: 'ほしぞら', romaji: 'hoshizora', meaning: 'langit berbintang' },
+  { id: 'mizuumi', text: 'みずうみ', romaji: 'mizuumi', meaning: 'danau' },
+  { id: 'murasaki', text: 'むらさき', romaji: 'murasaki', meaning: 'ungu' },
+  { id: 'yakiniku', text: 'やきにく', romaji: 'yakiniku', meaning: 'daging bakar' },
+  { id: 'yuugata', text: 'ゆうがた', romaji: 'yuugata', meaning: 'senja' },
+  { id: 'rainen', text: 'らいねん', romaji: 'rainen', meaning: 'tahun depan' },
 ];
 ===== src/lib/utils.ts =====
 // src/lib/utils.ts
-import type { HiraganaChar } from '../types';
+import type { StudyItem, WordLengthFilter } from '../types';
+import { WORD_DATA } from './constants';
 
-export const shuffleArray = (array: HiraganaChar[]): HiraganaChar[] => {
+export const shuffleArray = (array: StudyItem[]): StudyItem[] => {
   const newArr = [...array];
   for (let i = newArr.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -494,65 +1526,416 @@ export const shuffleArray = (array: HiraganaChar[]): HiraganaChar[] => {
   return newArr;
 };
 
-export const isSameOrder = (arr1: HiraganaChar[], arr2: HiraganaChar[]): boolean => {
+export const isSameOrder = (arr1: StudyItem[], arr2: StudyItem[]): boolean => {
   if (arr1.length !== arr2.length) return false;
   return arr1.every((val, index) => val.id === arr2[index].id);
+};
+
+export const getFilteredWords = (filter: WordLengthFilter): StudyItem[] => {
+  if (filter === 'all') return WORD_DATA;
+  if (filter === '2') return WORD_DATA.filter((w) => w.text.length === 2);
+  if (filter === '3') return WORD_DATA.filter((w) => w.text.length === 3);
+  return WORD_DATA.filter((w) => w.text.length >= 4);
+};
+
+// Fungsi baru untuk format stopwatch: MM:SS.mmm
+export const formatTime = (ms: number): string => {
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  const mm = Math.floor(ms % 1000);
+  return `${m > 0 ? m + ':' : ''}${s.toString().padStart(2, '0')}.${mm.toString().padStart(3, '0')}`;
+};
+===== src/lib/db.ts =====
+// src/lib/db.ts
+import Dexie, { type Table } from 'dexie';
+import type { HistoryEntry, TimerMode, GameMode, WordLengthFilter } from '../types';
+
+// 1. Inisialisasi Database
+class HiraganaDB extends Dexie {
+  histories!: Table<HistoryEntry, number>;
+
+  constructor() {
+    super('HiraganaDrillDB');
+    this.version(1).stores({
+      // Index yang sering dipakai untuk query PB
+      histories: '++id, timestamp, mode, timerMode, itemCount, wordFilter' 
+    });
+  }
+}
+
+export const db = new HiraganaDB();
+
+// 2. Fungsi Menyimpan History (dengan batas 100)
+export const saveHistory = async (entry: Omit<HistoryEntry, 'id'>): Promise<HistoryEntry> => {
+  const id = await db.histories.add(entry as HistoryEntry);
+  
+  // Cek jika lebih dari 100, hapus yang paling lama
+  const count = await db.histories.count();
+  if (count > 100) {
+    const oldest = await db.histories.orderBy('timestamp').first();
+    if (oldest && oldest.id) {
+      await db.histories.delete(oldest.id);
+    }
+  }
+  
+  return { ...entry, id } as HistoryEntry;
+};
+
+// 3. Fungsi Mengambil Semua History (Terbaru di atas)
+export const getHistory = async (): Promise<HistoryEntry[]> => {
+  return await db.histories.orderBy('timestamp').reverse().toArray();
+};
+
+// 4. Fungsi Menghapus 1 Entri
+export const deleteHistoryEntry = async (id: number) => {
+  await db.histories.delete(id);
+};
+
+// 5. Fungsi Menghapus Semua History
+export const clearAllHistory = async () => {
+  await db.histories.clear();
+};
+
+// 6. Fungsi Cek Personal Best (PB)
+export const checkPersonalBest = async (
+  mode: GameMode,
+  timerMode: TimerMode,
+  itemCount: number,
+  wordFilter: WordLengthFilter | undefined,
+  currentAvgMs: number
+): Promise<boolean> => {
+  
+  // Ambil semua history dengan kriteria yang sama
+  const filtered = await db.histories
+    .where({ mode, timerMode, itemCount })
+    .toArray();
+
+  // Filter wordFilter (karena Dexie tidak bisa query undefined dengan mudah)
+  const relevant = filtered.filter(h => h.wordFilter === wordFilter);
+
+  if (relevant.length === 0) return true; // Jika belum ada history, berarti PB pertama
+
+  // Cari waktu rata-rata terbaik (terkecil)
+  const bestAvg = Math.min(...relevant.map(h => h.avgMsPerItem));
+  
+  return currentAvgMs < bestAvg;
+};
+===== src/lib/export.ts =====
+// src/lib/export.ts
+import type { HistoryEntry } from '../types';
+
+// Format detail untuk CSV: あ(a) い(i)
+const formatItemsDetail = (items: HistoryEntry['items']): string => {
+  return items.map(i => `${i.text}(${i.romaji})`).join(' ');
+};
+
+// Format tanggal: 2026-06-14 14:32:15
+const formatTimestamp = (ts: number): string => {
+  const d = new Date(ts);
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+
+// Escape CSV: bungkus dengan quote jika mengandung koma/quote/newline
+const escapeCSV = (val: string | number | boolean | undefined): string => {
+  if (val === undefined || val === null) return '';
+  const str = String(val);
+  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+};
+
+// CSV Header
+const CSV_HEADER = [
+  'Timestamp',
+  'Mode',
+  'TimerMode',
+  'ItemCount',
+  'DurationMs',
+  'AvgMsPerItem',
+  'DurationSec',
+  'AvgSecPerItem',
+  'IsPersonalBest',
+  'WordFilter',
+  'Items'
+].join(',');
+
+// Generate CSV dari history
+export const toCSV = (history: HistoryEntry[]): string => {
+  const rows = history.map(h => [
+    escapeCSV(formatTimestamp(h.timestamp)),
+    escapeCSV(h.mode === 'char' ? 'Huruf' : 'Kata'),
+    escapeCSV(h.timerMode === 'countdown' ? 'Countdown' : 'Stopwatch'),
+    escapeCSV(h.itemCount),
+    escapeCSV(h.durationMs),
+    escapeCSV(h.avgMsPerItem.toFixed(2)),
+    escapeCSV((h.durationMs / 1000).toFixed(3)),
+    escapeCSV((h.avgMsPerItem / 1000).toFixed(3)),
+    escapeCSV(h.isPersonalBest ? 'Ya' : 'Tidak'),
+    escapeCSV(h.wordFilter === 'all' ? 'Semua' : h.wordFilter || '-'),
+    escapeCSV(formatItemsDetail(h.items))
+  ].join(','));
+  
+  return [CSV_HEADER, ...rows].join('\n');
+};
+
+// Generate JSON dari history (raw, standar, mudah dianalisa AI)
+export const toJSON = (history: HistoryEntry[]): string => {
+  return JSON.stringify(history, null, 2);
+};
+
+// Trigger download file
+export const downloadFile = (content: string, filename: string, mimeType: string) => {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+};
+
+// Nama file dengan timestamp: hiragana-history-2026-06-14_14-32.csv
+export const generateFilename = (ext: 'csv' | 'json'): string => {
+  const d = new Date();
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const time = `${pad(d.getHours())}-${pad(d.getMinutes())}`;
+  return `hiragana-history-${date}_${time}.${ext}`;
 };
 ===== src/store/gameStore.ts =====
 // src/store/gameStore.ts
 import { createStore } from 'zustand/vanilla';
-import type { GameState } from '../types';
+import type { GameState, RowType } from '../types';
 import { HIRAGANA_DATA } from '../lib/constants';
+import { getFilteredWords, shuffleArray } from '../lib/utils';
+import { getHistory } from '../lib/db';
+
+const getRowSlice = (row: RowType): [number, number] | null => {
+  switch (row) {
+    case 'a': return [0, 5];
+    case 'k': return [5, 10];
+    case 's': return [10, 15];
+    case 't': return [15, 20];
+    case 'n': return [20, 25];
+    case 'h': return [25, 30];
+    case 'm': return [30, 35];
+    case 'y': return [35, 38];
+    case 'r': return [38, 43];
+    case 'w': return [43, 45];
+    case 'nn': return [45, 46];
+    default: return null;
+  }
+};
+
+const getCharsFromRows = (rows: RowType[]): typeof HIRAGANA_DATA => {
+  if (rows.length === 0 || rows.includes('all')) return HIRAGANA_DATA;
+  const result: typeof HIRAGANA_DATA = [];
+  const order: RowType[] = ['a', 'k', 's', 't', 'n', 'h', 'm', 'y', 'r', 'w', 'nn'];
+  for (const row of order) {
+    if (rows.includes(row)) {
+      const slice = getRowSlice(row);
+      if (slice) {
+        result.push(...HIRAGANA_DATA.slice(slice[0], slice[1]));
+      }
+    }
+  }
+  return result;
+};
 
 export const gameStore = createStore<GameState>((set, get) => ({
-  maxCards: 5,
-  selectedChars: HIRAGANA_DATA.slice(0, 5),
-  activeCards: [],
-  showRomaji: true,
+  mode: 'char',
+  maxChars: 5,
+  maxWords: 5,
+  wordLengthFilter: 'all',
+  selectedRows: ['a'],
+  selectedItems: HIRAGANA_DATA.slice(0, 5),
+  activeItems: [],
+  showRomaji: false,
   useCardStyle: true,
-  isAutoShuffle: false,
-  timeInput: 60,
-  timeLeft: 60,
+  isShuffleEnabled: true,
+  timeInput: 10,
+  timeLeft: 10,
   isPlaying: false,
+  isPaused: false,
+  
+  timerMode: 'countdown',
+  startTimestamp: 0,
+  elapsedMs: 0,
+  pausedAccumMs: 0,
+  pauseStartTimestamp: 0,
+  history: [],
+  lastRecord: null,
 
-  setMaxCards: (num) => set((state) => {
-    const newSelected = state.selectedChars.slice(0, num);
-    return { maxCards: num, selectedChars: newSelected };
+  setMode: (mode) => set((state) => {
+    const sourceData = mode === 'char' ? getCharsFromRows(state.selectedRows) : getFilteredWords(state.wordLengthFilter);
+    const limit = mode === 'char' ? state.maxChars : state.maxWords;
+    const newMax = Math.min(limit, sourceData.length);
+    return { 
+      mode, 
+      selectedRows: mode === 'char' ? state.selectedRows : ['all'],
+      selectedItems: sourceData.slice(0, newMax), 
+      activeItems: [], 
+      isPlaying: false, 
+      isPaused: false, 
+      lastRecord: null, 
+      timeLeft: state.timeInput 
+    };
   }),
 
-  toggleChar: (char) => set((state) => {
-    const isSelected = state.selectedChars.find((c) => c.id === char.id);
-    if (isSelected) {
-      return { selectedChars: state.selectedChars.filter((c) => c.id !== char.id) };
+  setMaxItems: (num) => set((state) => {
+    const sourceData = state.mode === 'char' ? getCharsFromRows(state.selectedRows) : getFilteredWords(state.wordLengthFilter);
+    const validNum = Math.max(1, Math.min(num, sourceData.length));
+    if (state.mode === 'char') {
+      return { maxChars: validNum, selectedItems: state.selectedItems.slice(0, validNum), lastRecord: null };
+    } else {
+      return { maxWords: validNum, selectedItems: state.selectedItems.slice(0, validNum), lastRecord: null };
     }
-    if (state.selectedChars.length >= state.maxCards) return state;
-    return { selectedChars: [...state.selectedChars, char] };
+  }),
+
+  setWordLengthFilter: (filter) => set((state) => {
+    if (state.mode !== 'word') return { wordLengthFilter: filter };
+    const sourceData = getFilteredWords(filter);
+    const newMax = Math.min(state.maxWords, sourceData.length);
+    return { wordLengthFilter: filter, selectedRows: ['all'], selectedItems: sourceData.slice(0, newMax), lastRecord: null };
+  }),
+
+  toggleRowFilter: (row) => set((state) => {
+    if (state.mode !== 'char') {
+      return { selectedRows: ['all'] };
+    }
+
+    let newRows: RowType[] = [];
+    const currentRows = state.selectedRows.filter(r => r !== 'all');
+
+    if (row === 'all') {
+      newRows = ['a', 'k', 's', 't', 'n', 'h', 'm', 'y', 'r', 'w', 'nn'];
+    } else if (currentRows.includes(row)) {
+      newRows = currentRows.filter(r => r !== row);
+    } else {
+      newRows = [...currentRows, row];
+    }
+
+    if (newRows.length === 0) {
+      newRows = ['all'];
+    }
+
+    // PERBAIKAN: maxChars otomatis mengikuti total huruf tersedia
+    const availableChars = getCharsFromRows(newRows);
+    const newMax = availableChars.length;
+    
+    return {
+      selectedRows: newRows,
+      maxChars: newMax,
+      selectedItems: availableChars.slice(0, newMax),
+      lastRecord: null
+    };
+  }),
+
+  setTimerMode: (mode) => set((state) => ({ timerMode: mode, timeLeft: state.timeInput, lastRecord: null })),
+
+  toggleItem: (item) => set((state) => {
+    const isSelected = state.selectedItems.find((c) => c.id === item.id);
+    if (isSelected) {
+      return { selectedItems: state.selectedItems.filter((c) => c.id !== item.id) };
+    }
+    const limit = state.mode === 'char' ? state.maxChars : state.maxWords;
+    if (state.selectedItems.length >= limit) return state;
+    return { selectedItems: [...state.selectedItems, item] };
   }),
 
   toggleRomaji: () => set((state) => ({ showRomaji: !state.showRomaji })),
   toggleCardStyle: () => set((state) => ({ useCardStyle: !state.useCardStyle })),
-  toggleAutoShuffle: () => set((state) => ({ isAutoShuffle: !state.isAutoShuffle })),
+  toggleShuffle: () => set((state) => ({ isShuffleEnabled: !state.isShuffleEnabled })),
 
   setTimeInput: (time) => set({ timeInput: time, timeLeft: time }),
-  setActiveCards: (cards) => set({ activeCards: cards }),
+  setActiveItems: (items) => set({ activeItems: items }),
+
+  loadHistory: async () => {
+    const hist = await getHistory();
+    set({ history: hist });
+  },
+
+  setHistoryData: (history, lastRecord) => set({ history, lastRecord }),
+
+  stopAndSetRecord: (record) => set({ isPlaying: false, isPaused: false, lastRecord: record }),
 
   startGame: () => {
     const state = get();
-    if (state.selectedChars.length === 0) return false;
-    set({ isPlaying: true, timeLeft: state.timeInput });
+    if (state.selectedItems.length === 0) return false;
+    set({ 
+      isPlaying: true, 
+      isPaused: false, 
+      timeLeft: state.timeInput, 
+      startTimestamp: Date.now(),
+      elapsedMs: 0,
+      pausedAccumMs: 0,
+      pauseStartTimestamp: 0,
+      lastRecord: null
+    });
     return true;
   },
 
-  tickTimer: () => set((state) => {
-    if (state.timeLeft <= 1) {
-      return { timeLeft: 0, isPlaying: false };
+  restartGame: () => {
+    const state = get();
+    if (!state.isPlaying) return;
+    
+    let newActive = state.activeItems;
+    if (state.isShuffleEnabled) {
+      newActive = shuffleArray(state.selectedItems);
     }
-    return { timeLeft: state.timeLeft - 1 };
+
+    set({
+      activeItems: newActive,
+      timeLeft: state.timeInput,
+      startTimestamp: Date.now(),
+      elapsedMs: 0,
+      pausedAccumMs: 0,
+      pauseStartTimestamp: 0,
+      isPaused: false,
+      lastRecord: null
+    });
+  },
+
+  tickTimer: () => set((state) => {
+    if (state.isPaused || !state.isPlaying) return state;
+    const now = Date.now();
+    const realElapsed = now - state.startTimestamp - state.pausedAccumMs;
+
+    if (state.timerMode === 'countdown') {
+      const remaining = Math.max(0, state.timeInput - Math.floor(realElapsed / 1000));
+      if (remaining === 0) {
+        return { timeLeft: 0, isPlaying: false };
+      }
+      return { timeLeft: remaining };
+    } else {
+      return { elapsedMs: realElapsed };
+    }
+  }),
+
+  togglePause: () => set((state) => {
+    if (!state.isPlaying || (state.timerMode === 'countdown' && state.timeLeft === 0)) return state;
+    if (state.isPaused) {
+      const pauseDuration = Date.now() - state.pauseStartTimestamp;
+      return { isPaused: false, pausedAccumMs: state.pausedAccumMs + pauseDuration, pauseStartTimestamp: 0 };
+    } else {
+      return { isPaused: true, pauseStartTimestamp: Date.now() };
+    }
   }),
 
   resetGame: () => set((state) => ({ 
     isPlaying: false, 
+    isPaused: false,
     timeLeft: state.timeInput,
-    activeCards: [] 
+    elapsedMs: 0,
+    startTimestamp: 0,
+    pausedAccumMs: 0,
+    pauseStartTimestamp: 0,
+    lastRecord: null,
+    activeItems: [] 
   })),
 }));
